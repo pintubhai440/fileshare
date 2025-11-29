@@ -27,7 +27,7 @@ const App: React.FC = () => {
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   
-  // Refs for High Performance (No Re-renders on every chunk)
+  // High Performance Refs
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const bytesReceivedRef = useRef(0);
   const lastUpdateRef = useRef(0);
@@ -38,7 +38,16 @@ const App: React.FC = () => {
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    const peer = new Peer(shortId, { debug: 1 });
+    // Improved Peer Config for faster connection
+    const peer = new Peer(shortId, { 
+        debug: 1,
+        config: {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:global.stun.twilio.com:3478' }
+            ]
+        }
+    });
 
     peer.on('open', (id) => {
       setMyPeerId(id);
@@ -55,27 +64,28 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC (Optimized) ---
+  // --- RECEIVER LOGIC (Instant Start Fix) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
     conn.on('data', (data: any) => {
-      // 1. Metadata
+      // 1. Metadata - Immediate UI Update
       if (data.type === 'meta') {
         setReceivedFileMeta(data.meta);
-        chunksRef.current = [];
+        chunksRef.current = []; // Reset
         bytesReceivedRef.current = 0;
         setDownloadUrl(null);
         setTransferProgress(0);
+        console.log("Metadata received, ready for chunks");
       } 
-      // 2. Data Chunk
+      // 2. Data Chunk - Optimized Processing
       else if (data.type === 'chunk') {
         chunksRef.current.push(data.chunk);
         bytesReceivedRef.current += data.chunk.byteLength;
         
-        // Update UI only every 100ms to prevent lag
+        // Update UI every 50ms for smoother feel
         const now = Date.now();
-        if (now - lastUpdateRef.current > 100 && receivedFileMeta) {
+        if (now - lastUpdateRef.current > 50 && receivedFileMeta) {
             const percent = Math.min(100, Math.round((bytesReceivedRef.current / receivedFileMeta.size) * 100));
             setTransferProgress(percent);
             lastUpdateRef.current = now;
@@ -83,11 +93,15 @@ const App: React.FC = () => {
       } 
       // 3. End of File
       else if (data.type === 'end') {
-        const blob = new Blob(chunksRef.current, { type: data.mime });
-        const url = URL.createObjectURL(blob);
-        setDownloadUrl(url);
         setTransferProgress(100);
-        chunksRef.current = []; // Free RAM
+        
+        // Create Blob immediately
+        setTimeout(() => {
+            const blob = new Blob(chunksRef.current, { type: data.mime });
+            const url = URL.createObjectURL(blob);
+            setDownloadUrl(url);
+            chunksRef.current = []; // Free memory
+        }, 10);
       }
     });
 
@@ -97,7 +111,7 @@ const App: React.FC = () => {
     });
   };
 
-  // --- SENDER LOGIC (Optimized) ---
+  // --- SENDER LOGIC (Instant Send Fix) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -108,7 +122,7 @@ const App: React.FC = () => {
   const connectToPeer = () => {
     if (!remotePeerId || !peerRef.current) return;
     setConnectionStatus(`Connecting...`);
-    const conn = peerRef.current.connect(remotePeerId.toUpperCase());
+    const conn = peerRef.current.connect(remotePeerId.toUpperCase(), { reliable: true });
     connRef.current = conn;
     setupReceiverEvents(conn);
   };
@@ -121,7 +135,7 @@ const App: React.FC = () => {
 
     const conn = connRef.current;
     
-    // 1. Send Metadata
+    // 1. Send Metadata Immediately
     conn.send({
       type: 'meta',
       meta: { name: fileToSend.name, size: fileToSend.size, type: fileToSend.type }
@@ -129,12 +143,12 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
 
-    // 2. High Speed Chunking (64KB chunks)
+    // 2. Start Sending Chunks with minimal delay
+    // Increased Chunk Size for speed, but manageable for receiver
     const CHUNK_SIZE = 64 * 1024; 
     const fileReader = new FileReader();
     let offset = 0;
-    let startTime = Date.now();
-
+    
     fileReader.onload = (e) => {
       if (!e.target?.result) return;
       
@@ -144,15 +158,16 @@ const App: React.FC = () => {
         conn.send({ type: 'chunk', chunk: buffer });
         offset += buffer.byteLength;
 
-        // Smart UI Update (Don't update too often)
+        // Smart Progress Update
         const now = Date.now();
-        if (now - startTime > 200) {
+        if (now - lastUpdateRef.current > 100) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
              setTransferProgress(progress);
-             startTime = now;
+             lastUpdateRef.current = now;
         }
 
         if (offset < fileToSend.size) {
+           // No timeout = Max Speed
            readNextChunk();
         } else {
            conn.send({ type: 'end', mime: fileToSend.type });
@@ -160,8 +175,8 @@ const App: React.FC = () => {
            alert("File Sent Successfully!");
         }
       } catch (err) {
-        // Simple backpressure: wait 50ms if buffer full
-        setTimeout(() => readNextChunk(), 50);
+        // If buffer full, brief pause
+        setTimeout(() => readNextChunk(), 10);
       }
     };
 
@@ -170,7 +185,8 @@ const App: React.FC = () => {
       fileReader.readAsArrayBuffer(slice);
     };
 
-    readNextChunk();
+    // Small delay to ensure metadata is processed first
+    setTimeout(() => readNextChunk(), 100);
   };
 
   return (
@@ -181,7 +197,7 @@ const App: React.FC = () => {
 
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare P2P (Turbo)</span>
+           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare P2P (Instant)</span>
            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
              Status: <span className="text-green-400">{connectionStatus}</span>
            </div>
@@ -209,7 +225,7 @@ const App: React.FC = () => {
               <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500">
                 <input type="file" onChange={handleFileSelect} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                 <div className="space-y-2">
-                    <p className="text-xl font-medium">{fileToSend ? fileToSend.name : "Select Large File"}</p>
+                    <p className="text-xl font-medium">{fileToSend ? fileToSend.name : "Select File to Send"}</p>
                     {fileToSend && <p className="text-xs text-gray-400">{(fileToSend.size / (1024*1024)).toFixed(2)} MB</p>}
                 </div>
               </div>
@@ -237,7 +253,7 @@ const App: React.FC = () => {
                 disabled={!fileToSend || connectionStatus.includes('Initializing')}
                 className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50"
               >
-                Start Fast Transfer 🚀
+                Send Instantly 🚀
               </button>
             </div>
           )}
