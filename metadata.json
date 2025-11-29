@@ -1,0 +1,7 @@
+{
+  "name": "SecureShare AI",
+  "description": "Ultra-fast, secure file transfer up to 500GB with PIN protection, auto-deletion, and built-in Gemini AI intelligence.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
