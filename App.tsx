@@ -3,7 +3,6 @@ import { Tab } from './types';
 import { ChatBot } from './components/ChatBot';
 import Peer, { DataConnection } from 'peerjs';
 
-// Types define karte hain
 interface FileMeta {
   name: string;
   size: number;
@@ -13,7 +12,7 @@ interface FileMeta {
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.SEND);
   
-  // PeerJS State (Connection ke liye)
+  // PeerJS State
   const [myPeerId, setMyPeerId] = useState<string>('');
   const [connectionStatus, setConnectionStatus] = useState<string>('Initializing...');
   const peerRef = useRef<Peer | null>(null);
@@ -27,30 +26,27 @@ const App: React.FC = () => {
   const [remotePeerId, setRemotePeerId] = useState('');
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  
+  // Memory management for large files
+  const chunksRef = useRef<ArrayBuffer[]>([]);
 
   // Chat Widget State
   const [isChatOpen, setIsChatOpen] = useState(false);
 
-  // App khulte hi Peer ID generate karein
   useEffect(() => {
-    // Random 4-digit ID banayenge (Easy to type)
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // PeerJS initialization
-    const peer = new Peer(shortId, {
-      debug: 2
-    });
+    const peer = new Peer(shortId, { debug: 2 });
 
     peer.on('open', (id) => {
       setMyPeerId(id);
       setConnectionStatus('Ready to Connect');
     });
 
-    // Jab koi DOOSRA humse connect kare (Receiver side logic)
     peer.on('connection', (conn) => {
       connRef.current = conn;
       setConnectionStatus(`Connected to ${conn.peer}`);
-      setupConnectionEvents(conn);
+      setupReceiverEvents(conn);
     });
 
     peerRef.current = peer;
@@ -60,29 +56,41 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Connection events handle karna
-  const setupConnectionEvents = (conn: DataConnection) => {
+  // --- RECEIVER LOGIC ---
+  const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => {
       setConnectionStatus(`Connected securely to ${conn.peer}`);
     });
 
     conn.on('data', (data: any) => {
-      // Step 1: Metadata mila (File ka naam aur size)
+      // Step 1: New File Info
       if (data.type === 'meta') {
         setReceivedFileMeta(data.meta);
-      }
-      // Step 2: Asli file mili
-      else if (data.type === 'file') {
-         const blob = new Blob([data.blob], { type: data.mime });
-         const url = URL.createObjectURL(blob);
-         setDownloadUrl(url);
-         setTransferProgress(100);
+        chunksRef.current = []; // Clear previous memory
+        setDownloadUrl(null);
+        setTransferProgress(0);
+      } 
+      // Step 2: Receive Chunk
+      else if (data.type === 'chunk') {
+        chunksRef.current.push(data.chunk);
+        
+        // Optional: Update progress based on chunks received vs expected size
+        // (Simplified here to avoid lag)
+      } 
+      // Step 3: File Complete
+      else if (data.type === 'end') {
+        const blob = new Blob(chunksRef.current, { type: data.mime });
+        const url = URL.createObjectURL(blob);
+        setDownloadUrl(url);
+        setTransferProgress(100);
+        chunksRef.current = []; // Free up memory after blob creation
       }
     });
 
     conn.on('close', () => {
       setConnectionStatus('Connection Closed');
       setTransferProgress(0);
+      chunksRef.current = [];
     });
 
     conn.on('error', (err) => {
@@ -99,15 +107,13 @@ const App: React.FC = () => {
     }
   };
 
-  // Receiver se connect karna
   const connectToPeer = () => {
-    if (!remotePeerId) return;
-    if (!peerRef.current) return;
+    if (!remotePeerId || !peerRef.current) return;
 
     setConnectionStatus(`Connecting to ${remotePeerId}...`);
     const conn = peerRef.current.connect(remotePeerId.toUpperCase());
     connRef.current = conn;
-    setupConnectionEvents(conn);
+    setupReceiverEvents(conn);
   };
 
   const sendFile = () => {
@@ -118,7 +124,7 @@ const App: React.FC = () => {
 
     const conn = connRef.current;
     
-    // 1. Pehle file ki details bhejo
+    // 1. Send Metadata
     conn.send({
       type: 'meta',
       meta: {
@@ -128,18 +134,45 @@ const App: React.FC = () => {
       }
     });
 
-    setTransferProgress(10);
+    setTransferProgress(1);
 
-    // 2. Thodi der baad asli file bhejo
-    setTimeout(() => {
+    // 2. Start Chunked Transfer
+    const CHUNK_SIZE = 16 * 1024; // 16KB chunks (Safe for WebRTC)
+    const fileReader = new FileReader();
+    let offset = 0;
+
+    fileReader.onload = (e) => {
+      if (!e.target?.result) return;
+      
+      // Send chunk
       conn.send({
-        type: 'file',
-        blob: fileToSend,
-        mime: fileToSend.type
+        type: 'chunk',
+        chunk: e.target.result
       });
-      setTransferProgress(100);
-      alert("File Sent Successfully!");
-    }, 500);
+
+      offset += e.target.result.byteLength;
+
+      // Update UI
+      const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
+      setTransferProgress(progress);
+
+      // Read next chunk
+      if (offset < fileToSend.size) {
+        readNextChunk();
+      } else {
+        // Finish
+        conn.send({ type: 'end', mime: fileToSend.type });
+        alert("File Sent Successfully!");
+      }
+    };
+
+    const readNextChunk = () => {
+      const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
+      fileReader.readAsArrayBuffer(slice);
+    };
+
+    // Start reading
+    readNextChunk();
   };
 
   return (
@@ -179,7 +212,10 @@ const App: React.FC = () => {
             <div className="space-y-6">
               <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500">
                 <input type="file" onChange={handleFileSelect} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                <p className="text-xl font-medium">{fileToSend ? fileToSend.name : "Select File to Send"}</p>
+                <div className="space-y-2">
+                    <p className="text-xl font-medium">{fileToSend ? fileToSend.name : "Select Large File to Send"}</p>
+                    {fileToSend && <p className="text-xs text-gray-400">{(fileToSend.size / (1024*1024)).toFixed(2)} MB</p>}
+                </div>
               </div>
 
               <div className="flex gap-2 items-center bg-gray-900 p-4 rounded-xl border border-gray-700">
@@ -193,12 +229,18 @@ const App: React.FC = () => {
                  <button onClick={connectToPeer} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm">Connect</button>
               </div>
 
+              {transferProgress > 0 && (
+                <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
+                    <div className="bg-blue-500 h-full transition-all duration-75" style={{ width: `${transferProgress}%` }}></div>
+                </div>
+              )}
+
               <button 
                 onClick={sendFile} 
                 disabled={!fileToSend || connectionStatus.includes('Initializing')}
                 className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50"
               >
-                Send Direct P2P
+                Send File (Chunked)
               </button>
             </div>
           )}
@@ -216,7 +258,7 @@ const App: React.FC = () => {
                  </div>
                )}
 
-               {downloadUrl && (
+               {downloadUrl ? (
                  <a 
                    href={downloadUrl} 
                    download={receivedFileMeta?.name}
@@ -224,10 +266,17 @@ const App: React.FC = () => {
                  >
                    Download Now
                  </a>
-               )}
-
-               {!downloadUrl && receivedFileMeta && (
-                 <div className="text-blue-400 animate-pulse mt-4">Receiving data...</div>
+               ) : (
+                  // Show loading if meta received but URL not ready
+                  receivedFileMeta && (
+                      <div className="mt-4">
+                          <p className="text-blue-400 animate-pulse mb-2">Receiving Data...</p>
+                          <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden mx-auto max-w-xs">
+                             <div className="bg-blue-500 h-full w-full animate-pulse"></div>
+                          </div>
+                          <p className="text-xs text-gray-500 mt-2">Do not close this tab</p>
+                      </div>
+                  )
                )}
              </div>
           )}
