@@ -1,6 +1,7 @@
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { GoogleGenAI, Modality } from "@google/genai";
 
-const apiKey = process.env.API_KEY || '';
+// Ensure API Key is picked up from Vite env
+const apiKey = process.env.API_KEY || ''; 
 const ai = new GoogleGenAI({ apiKey });
 
 // Helper to encode file for Gemini
@@ -36,7 +37,6 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
 
 /**
  * 1. Smart Chatbot (Using Gemini 2.5 Pro)
- * STATUS: Working ✅
  */
 export const sendChatMessage = async (
   history: { role: string; parts: { text: string }[] }[],
@@ -54,7 +54,7 @@ export const sendChatMessage = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro', // Keep using this as it works for you
+      model: 'gemini-2.5-pro',
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
@@ -86,7 +86,6 @@ export const sendChatMessage = async (
 
 /**
  * 2. Analyze Image/Video (Using Gemini 2.5 Pro)
- * STATUS: Should Work ✅
  */
 export const analyzeFileContent = async (file: File): Promise<string> => {
   try {
@@ -114,8 +113,7 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
 };
 
 /**
- * 3. Transcribe Audio
- * CHANGED: gemini-2.5-flash -> gemini-2.0-flash (More stable for audio input)
+ * 3. Transcribe Audio (Using Gemini 2.0 Flash for stability)
  */
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   try {
@@ -126,7 +124,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
           const base64data = (reader.result as string).split(',')[1];
           
           const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash', // ✅ Reverted to stable 2.0 Flash
+            model: 'gemini-2.0-flash',
             contents: {
               parts: [
                 { inlineData: { mimeType: audioBlob.type || 'audio/wav', data: base64data } },
@@ -146,13 +144,12 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 };
 
 /**
- * 4. Text-to-Speech
- * CHANGED: gemini-2.5-flash -> gemini-2.0-flash-exp (Experimental model allows Audio Output)
+ * 4. Text-to-Speech (Using Gemini 2.0 Flash Exp for Audio Output)
  */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-exp", // ✅ 'exp' model supports Audio Generation
+      model: "gemini-2.0-flash-exp",
       contents: [{ parts: [{ text }] }],
       config: {
         responseModalities: [Modality.AUDIO],
