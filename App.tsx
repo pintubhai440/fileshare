@@ -32,8 +32,8 @@ const App: React.FC = () => {
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const bytesReceivedRef = useRef(0);
   const lastUpdateRef = useRef(0);
-  const lastBytesRef = useRef(0); // For speed calculation
-  const receivedFileMetaRef = useRef<FileMeta | null>(null); // Critical fix for receiver UI
+  const lastBytesRef = useRef(0);
+  const receivedFileMetaRef = useRef<FileMeta | null>(null);
 
   // Chat Widget State
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -41,9 +41,9 @@ const App: React.FC = () => {
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // Config: Google STUN servers are reliable
+    // Config: Ultra High Performance Setup
     const peer = new Peer(shortId, { 
-        debug: 0, // No logs for max speed
+        debug: 0, 
         config: {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -67,7 +67,7 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC (Fixed Progress & Speed) ---
+  // --- RECEIVER LOGIC (Ultra Fast UI Updates) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
@@ -78,18 +78,18 @@ const App: React.FC = () => {
         bytesReceivedRef.current += data.byteLength;
         
         const now = Date.now();
-        // Update UI every 500ms (Prevent UI freeze on large files)
-        if (now - lastUpdateRef.current > 500 && receivedFileMetaRef.current) {
+        // Update UI every 200ms for smoother feel (Faster updates than before)
+        if (now - lastUpdateRef.current > 200 && receivedFileMetaRef.current) {
             const totalSize = receivedFileMetaRef.current.size;
             const percent = Math.min(100, Math.round((bytesReceivedRef.current / totalSize) * 100));
             
-            // Calculate Speed
+            // Speed Calculation
             const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
             const timeDiff = (now - lastUpdateRef.current) / 1000; // seconds
             const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
             
             setTransferProgress(percent);
-            setTransferSpeed(`${speedMBps.toFixed(2)} MB/s`);
+            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
             
             lastUpdateRef.current = now;
             lastBytesRef.current = bytesReceivedRef.current;
@@ -97,7 +97,7 @@ const App: React.FC = () => {
       } 
       // 2. Metadata (Start)
       else if (data.type === 'meta') {
-        receivedFileMetaRef.current = data.meta; // Store in Ref for instant access
+        receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
         chunksRef.current = []; 
@@ -108,34 +108,32 @@ const App: React.FC = () => {
         setDownloadUrl(null);
         setTransferProgress(0);
         setTransferSpeed('Starting...');
-        console.log("Metadata received, starting transfer...");
       } 
       // 3. End of File
       else if (data.type === 'end') {
         setTransferProgress(100);
         setTransferSpeed('Finalizing...');
         
-        // Build Blob (Heavy operation for 4GB, giving UI time to breathe)
+        // Use timeout to allow UI to render 100% before freezing for Blob creation
         setTimeout(() => {
             if (receivedFileMetaRef.current) {
                 const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
                 const url = URL.createObjectURL(blob);
                 setDownloadUrl(url);
-                chunksRef.current = []; // Clear RAM
+                chunksRef.current = []; 
                 setTransferSpeed('Completed');
             }
-        }, 100);
+        }, 50);
       }
     });
 
     conn.on('close', () => {
       setConnectionStatus('Connection Closed');
       setTransferProgress(0);
-      setTransferSpeed('0 MB/s');
     });
   };
 
-  // --- SENDER LOGIC (Ultra Fast Flow Control) ---
+  // --- SENDER LOGIC (1MB Chunks + Smart Buffer Control) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -168,13 +166,11 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
     
-    // 2. Optimized Chunk Processing (The Ferrari Engine)
-    // 64KB is the sweet spot for WebRTC to avoid congestion
-    const CHUNK_SIZE = 64 * 1024; 
+    // ✅ ULTRA MODE: 1MB Chunk Size
+    const CHUNK_SIZE = 1024 * 1024; // 1024KB (1MB)
     const fileReader = new FileReader();
     let offset = 0;
     
-    // Reset Speed Calc
     lastUpdateRef.current = Date.now();
     lastBytesRef.current = 0;
 
@@ -183,22 +179,19 @@ const App: React.FC = () => {
       const buffer = e.target.result as ArrayBuffer;
       
       try {
-        // Send Data
         conn.send(buffer);
         offset += buffer.byteLength;
 
-        // UI Updates (Throttled for performance)
         const now = Date.now();
-        if (now - lastUpdateRef.current > 500) {
+        if (now - lastUpdateRef.current > 200) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
              
-             // Speed Calc
              const bytesDiff = offset - lastBytesRef.current;
              const timeDiff = (now - lastUpdateRef.current) / 1000;
              const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
 
              setTransferProgress(progress);
-             setTransferSpeed(`${speedMBps.toFixed(2)} MB/s`);
+             setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
              
              lastUpdateRef.current = now;
              lastBytesRef.current = offset;
@@ -212,17 +205,18 @@ const App: React.FC = () => {
            setTransferSpeed('Sent');
         }
       } catch (err) {
-        // Fallback
-        setTimeout(readNextChunk, 100);
+        console.warn("Congestion detected, retrying...");
+        setTimeout(readNextChunk, 50);
       }
     };
 
     const readNextChunk = () => {
-      // **CRITICAL SPEED FIX: Backpressure Control**
-      // If browser buffer is full (>16MB), wait until it drains.
-      // This prevents crashing and ensures max consistent speed.
-      if (conn.dataChannel.bufferedAmount > 16 * 1024 * 1024) {
-          setTimeout(readNextChunk, 50); // Wait 50ms and check again
+      // 🔥 SMART BRAKE SYSTEM
+      // WebRTC buffer limit is roughly 16MB in Chrome.
+      // If buffer > 12MB, we pause. This prevents crash with 1MB chunks.
+      if (conn.dataChannel.bufferedAmount > 12 * 1024 * 1024) {
+          // Wait for buffer to drain
+          setTimeout(readNextChunk, 30); 
           return;
       }
       
@@ -230,7 +224,6 @@ const App: React.FC = () => {
       fileReader.readAsArrayBuffer(slice);
     };
 
-    // Start immediately
     readNextChunk();
   };
 
@@ -242,7 +235,7 @@ const App: React.FC = () => {
 
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare P2P (Max Speed)</span>
+           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare (1MB Chunks)</span>
            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
              Status: <span className="text-green-400">{connectionStatus}</span>
            </div>
