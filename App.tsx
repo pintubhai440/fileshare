@@ -41,7 +41,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // Config: Ultra High Performance Setup
+    // Config: Maximum Throughput
     const peer = new Peer(shortId, { 
         debug: 0, 
         config: {
@@ -67,7 +67,7 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC (Ultra Fast UI Updates) ---
+  // --- RECEIVER LOGIC (Optimized for Huge Chunks) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
@@ -78,14 +78,14 @@ const App: React.FC = () => {
         bytesReceivedRef.current += data.byteLength;
         
         const now = Date.now();
-        // Update UI every 200ms for smoother feel (Faster updates than before)
-        if (now - lastUpdateRef.current > 200 && receivedFileMetaRef.current) {
+        // Update UI slightly slower (300ms) to save CPU for handling 5MB chunks
+        if (now - lastUpdateRef.current > 300 && receivedFileMetaRef.current) {
             const totalSize = receivedFileMetaRef.current.size;
             const percent = Math.min(100, Math.round((bytesReceivedRef.current / totalSize) * 100));
             
             // Speed Calculation
             const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
-            const timeDiff = (now - lastUpdateRef.current) / 1000; // seconds
+            const timeDiff = (now - lastUpdateRef.current) / 1000; 
             const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
             
             setTransferProgress(percent);
@@ -95,7 +95,7 @@ const App: React.FC = () => {
             lastBytesRef.current = bytesReceivedRef.current;
         }
       } 
-      // 2. Metadata (Start)
+      // 2. Metadata
       else if (data.type === 'meta') {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
@@ -114,7 +114,7 @@ const App: React.FC = () => {
         setTransferProgress(100);
         setTransferSpeed('Finalizing...');
         
-        // Use timeout to allow UI to render 100% before freezing for Blob creation
+        // Give more time (100ms) for UI to settle before heavy Blob creation
         setTimeout(() => {
             if (receivedFileMetaRef.current) {
                 const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
@@ -123,7 +123,7 @@ const App: React.FC = () => {
                 chunksRef.current = []; 
                 setTransferSpeed('Completed');
             }
-        }, 50);
+        }, 100);
       }
     });
 
@@ -133,7 +133,7 @@ const App: React.FC = () => {
     });
   };
 
-  // --- SENDER LOGIC (1MB Chunks + Smart Buffer Control) ---
+  // --- SENDER LOGIC (5MB EXTREME MODE) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -166,8 +166,8 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
     
-    // ✅ ULTRA MODE: 1MB Chunk Size
-    const CHUNK_SIZE = 1024 * 1024; // 1024KB (1MB)
+    // 🔥 EXTREME MODE: 5MB Chunks
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -183,7 +183,7 @@ const App: React.FC = () => {
         offset += buffer.byteLength;
 
         const now = Date.now();
-        if (now - lastUpdateRef.current > 200) {
+        if (now - lastUpdateRef.current > 300) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
              
              const bytesDiff = offset - lastBytesRef.current;
@@ -205,18 +205,20 @@ const App: React.FC = () => {
            setTransferSpeed('Sent');
         }
       } catch (err) {
-        console.warn("Congestion detected, retrying...");
-        setTimeout(readNextChunk, 50);
+        console.warn("Buffer full, pausing...", err);
+        setTimeout(readNextChunk, 100);
       }
     };
 
     const readNextChunk = () => {
-      // 🔥 SMART BRAKE SYSTEM
-      // WebRTC buffer limit is roughly 16MB in Chrome.
-      // If buffer > 12MB, we pause. This prevents crash with 1MB chunks.
-      if (conn.dataChannel.bufferedAmount > 12 * 1024 * 1024) {
-          // Wait for buffer to drain
-          setTimeout(readNextChunk, 30); 
+      // 🛑 SAFETY BRAKE SYSTEM (Critical for 5MB Chunks)
+      // Chrome Buffer Limit = ~16MB
+      // We are sending 5MB chunks.
+      // So, buffer must be BELOW 10MB before sending next chunk.
+      // If buffer is > 10MB, pause immediately.
+      
+      if (conn.dataChannel.bufferedAmount > 10 * 1024 * 1024) {
+          setTimeout(readNextChunk, 50); // Check again in 50ms
           return;
       }
       
@@ -235,7 +237,7 @@ const App: React.FC = () => {
 
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare (1MB Chunks)</span>
+           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare (5MB Extreme)</span>
            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
              Status: <span className="text-green-400">{connectionStatus}</span>
            </div>
