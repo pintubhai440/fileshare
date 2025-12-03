@@ -35,11 +35,13 @@ const App: React.FC = () => {
   const lastBytesRef = useRef(0);
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
 
+  // Chat Widget State
   const [isChatOpen, setIsChatOpen] = useState(false);
 
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
+    // Config: Maximum Throughput
     const peer = new Peer(shortId, { 
         debug: 0, 
         config: {
@@ -65,23 +67,25 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER (Fixed: Instant Smooth Progress) ---
+  // --- RECEIVER LOGIC (Optimized for Huge Chunks) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
     conn.on('data', (data: any) => {
+      // 1. RAW BINARY CHUNK
       if (data instanceof ArrayBuffer) {
         chunksRef.current.push(data);
         bytesReceivedRef.current += data.byteLength;
         
         const now = Date.now();
-        // ✅ FIX: Reduced delay to 100ms for buttery smooth progress bar
-        if (now - lastUpdateRef.current > 100 && receivedFileMetaRef.current) {
+        // Update UI slightly slower (300ms) to save CPU for handling 5MB chunks
+        if (now - lastUpdateRef.current > 300 && receivedFileMetaRef.current) {
             const totalSize = receivedFileMetaRef.current.size;
             const percent = Math.min(100, Math.round((bytesReceivedRef.current / totalSize) * 100));
             
+            // Speed Calculation
             const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
-            const timeDiff = (now - lastUpdateRef.current) / 1000;
+            const timeDiff = (now - lastUpdateRef.current) / 1000; 
             const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
             
             setTransferProgress(percent);
@@ -91,6 +95,7 @@ const App: React.FC = () => {
             lastBytesRef.current = bytesReceivedRef.current;
         }
       } 
+      // 2. Metadata
       else if (data.type === 'meta') {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
@@ -102,21 +107,23 @@ const App: React.FC = () => {
         
         setDownloadUrl(null);
         setTransferProgress(0);
-        setTransferSpeed('🚀 Starting...');
+        setTransferSpeed('Starting...');
       } 
+      // 3. End of File
       else if (data.type === 'end') {
         setTransferProgress(100);
-        setTransferSpeed('Processing...');
+        setTransferSpeed('Finalizing...');
         
+        // Give more time (100ms) for UI to settle before heavy Blob creation
         setTimeout(() => {
             if (receivedFileMetaRef.current) {
                 const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
                 const url = URL.createObjectURL(blob);
                 setDownloadUrl(url);
                 chunksRef.current = []; 
-                setTransferSpeed('Done! Click Save.');
+                setTransferSpeed('Completed');
             }
-        }, 10);
+        }, 100);
       }
     });
 
@@ -126,7 +133,7 @@ const App: React.FC = () => {
     });
   };
 
-  // --- SENDER (Flash Mode) ---
+  // --- SENDER LOGIC (5MB EXTREME MODE) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -151,6 +158,7 @@ const App: React.FC = () => {
 
     const conn = connRef.current;
     
+    // 1. Send Metadata
     conn.send({
       type: 'meta',
       meta: { name: fileToSend.name, size: fileToSend.size, type: fileToSend.type }
@@ -158,8 +166,8 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
     
-    // 64KB Chunk for best consistency
-    const CHUNK_SIZE = 64 * 1024; 
+    // 🔥 EXTREME MODE: 5MB Chunks
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -173,17 +181,18 @@ const App: React.FC = () => {
       try {
         conn.send(buffer);
         offset += buffer.byteLength;
-        
+
         const now = Date.now();
-        // Sender UI also updated to 100ms for smoothness
-        if (now - lastUpdateRef.current > 100) {
+        if (now - lastUpdateRef.current > 300) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
+             
              const bytesDiff = offset - lastBytesRef.current;
              const timeDiff = (now - lastUpdateRef.current) / 1000;
              const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
 
              setTransferProgress(progress);
              setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+             
              lastUpdateRef.current = now;
              lastBytesRef.current = offset;
         }
@@ -193,16 +202,23 @@ const App: React.FC = () => {
         } else {
            conn.send({ type: 'end' });
            setTransferProgress(100);
-           setTransferSpeed('Sent!');
+           setTransferSpeed('Sent');
         }
-      } catch (error) {
-         readNextChunk();
+      } catch (err) {
+        console.warn("Buffer full, pausing...", err);
+        setTimeout(readNextChunk, 100);
       }
     };
 
     const readNextChunk = () => {
-      if (conn.dataChannel.bufferedAmount > 16 * 1024 * 1024) {
-          setTimeout(readNextChunk, 1); 
+      // 🛑 SAFETY BRAKE SYSTEM (Critical for 5MB Chunks)
+      // Chrome Buffer Limit = ~16MB
+      // We are sending 5MB chunks.
+      // So, buffer must be BELOW 10MB before sending next chunk.
+      // If buffer is > 10MB, pause immediately.
+      
+      if (conn.dataChannel.bufferedAmount > 10 * 1024 * 1024) {
+          setTimeout(readNextChunk, 50); // Check again in 50ms
           return;
       }
       
@@ -221,7 +237,7 @@ const App: React.FC = () => {
 
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare (Smooth UI)</span>
+           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare (5MB Extreme)</span>
            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
              Status: <span className="text-green-400">{connectionStatus}</span>
            </div>
