@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-// Changed import path from alias '@/' back to relative '../' to fix build error
 import { sendChatMessage, transcribeAudio, generateSpeech } from '../services/geminiService';
 import { ChatMessage } from '../types';
 
@@ -94,7 +93,7 @@ export const ChatBot: React.FC = () => {
     }
   };
 
-  // ✅ FIXED TTS FUNCTION
+  // ✅ FIXED TTS FUNCTION (Auto Resume & Error Handling)
   const playTTS = async (text: string, msgId: string) => {
     try {
       // 1. Show Loading State
@@ -123,13 +122,13 @@ export const ChatBot: React.FC = () => {
       }, (e) => {
         console.error("Error decoding audio data", e);
         setPlayingMessageId(null);
-        alert("Error playing audio. Format not supported.");
+        alert("Audio format error. Try again.");
       });
 
-    } catch (e) {
+    } catch (e: any) {
       console.error("Audio playback failed", e);
       setPlayingMessageId(null);
-      alert("Failed to generate speech. Please check console.");
+      alert(`TTS Failed: ${e.message || "Check console"}`);
     }
   };
 
@@ -141,7 +140,7 @@ export const ChatBot: React.FC = () => {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
           Smart Assistant
         </h3>
-        <span className="text-xs bg-white/20 px-2 py-0.5 rounded text-white">Gemini 2.5 Pro</span>
+        <span className="text-xs bg-white/20 px-2 py-0.5 rounded text-white">Gemini 2.0 Flash</span>
       </div>
 
       {/* Messages */}
@@ -173,7 +172,7 @@ export const ChatBot: React.FC = () => {
               {msg.role === 'model' && (
                 <button 
                   onClick={() => playTTS(msg.text, msg.id)}
-                  disabled={playingMessageId !== null && playingMessageId !== msg.id} // Disable other buttons while one plays
+                  disabled={playingMessageId !== null && playingMessageId !== msg.id} 
                   className={`mt-2 text-xs flex items-center gap-1 transition-colors ${
                     playingMessageId === msg.id 
                       ? 'text-green-400 font-bold' 
