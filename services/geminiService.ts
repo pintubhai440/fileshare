@@ -150,7 +150,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-exp", // Switch to reliable Flash model
+      model: "gemini-2.5-flash-native-audio-preview-09-2025", // Switch to reliable Flash model
       contents: [{ 
         parts: [{ text: `Read this aloud naturally (audio only): "${text}"` }] 
       }],
