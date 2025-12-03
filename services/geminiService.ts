@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 
 // Ensure API Key is picked up from Vite env
 const apiKey = process.env.API_KEY || ''; 
@@ -36,7 +36,7 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
 };
 
 /**
- * 1. Smart Chatbot (Using Gemini 2.5 Pro)
+ * 1. Smart Chatbot
  */
 export const sendChatMessage = async (
   history: { role: string; parts: { text: string }[] }[],
@@ -46,25 +46,26 @@ export const sendChatMessage = async (
     const systemInstruction = `
       You are the intelligent assistant for 'SecureShare AI', a secure P2P file transfer platform.
       YOUR KNOWLEDGE BASE:
-      - Identity: You are the SecureShare AI Bot (Powered by Gemini 2.5).
-      - Core Tech: WebRTC (PeerJS) for direct Device-to-Device transfer. NO SERVER STORAGE.
+      - Identity: You are the SecureShare AI Bot.
+      - Core Tech: WebRTC (PeerJS). NO SERVER STORAGE.
       - Privacy: Files are 100% private, existing only in RAM. 
-      - Deletion: Files vanish instantly when the tab is closed or transfer ends.
+      - Deletion: Files vanish instantly when tab closes.
       TONE: Helpful, technical, and concise.
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro',
+      model: 'gemini-2.0-flash', // Using stable Flash model
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
       ],
       config: {
         systemInstruction: { parts: [{ text: systemInstruction }] },
-        thinkingConfig: { thinkingBudget: 1024 },
-        tools: [{ googleSearch: {} }], 
       }
     });
+
+    // Robust text extraction
+    const text = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't generate a response.";
 
     const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
     const urls = groundingChunks
@@ -72,7 +73,7 @@ export const sendChatMessage = async (
       .filter((u: any) => u !== null) || [];
 
     return {
-      text: response.text || "I couldn't generate a response.",
+      text: text,
       urls: urls
     };
   } catch (error: any) {
@@ -85,7 +86,7 @@ export const sendChatMessage = async (
 };
 
 /**
- * 2. Analyze Image/Video (Using Gemini 2.5 Pro)
+ * 2. Analyze Image/Video
  */
 export const analyzeFileContent = async (file: File): Promise<string> => {
   try {
@@ -96,7 +97,7 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
     const filePart = await fileToGenerativePart(file);
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro',
+      model: 'gemini-2.0-flash',
       contents: {
         parts: [
           filePart,
@@ -113,7 +114,7 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
 };
 
 /**
- * 3. Transcribe Audio (Using Gemini 2.0 Flash for stability)
+ * 3. Transcribe Audio
  */
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   try {
@@ -144,15 +145,17 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 };
 
 /**
- * 4. Text-to-Speech (Using Gemini 2.0 Flash Exp for Audio Output)
+ * 4. ✅ FIXED: Text-to-Speech (Robust Audio Finder)
  */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-exp",
-      contents: [{ parts: [{ text }] }],
+      model: "gemini-2.0-flash", // Switch to reliable Flash model
+      contents: [{ 
+        parts: [{ text: `Read this aloud naturally (audio only): "${text}"` }] 
+      }],
       config: {
-        responseModalities: [Modality.AUDIO],
+        responseModalities: ["AUDIO"], // Force Audio mode
         speechConfig: {
           voiceConfig: {
             prebuiltVoiceConfig: { voiceName: 'Kore' },
@@ -161,8 +164,19 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
       },
     });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!base64Audio) throw new Error("No audio generated");
+    // ✅ FIX: Loop through parts to find the actual audio data
+    // (Sometimes Gemini sends text metadata in part[0], so we search for the audio part)
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    let base64Audio = null;
+
+    for (const part of parts) {
+      if (part.inlineData && part.inlineData.data) {
+        base64Audio = part.inlineData.data;
+        break; 
+      }
+    }
+    
+    if (!base64Audio) throw new Error("No audio data found in response.");
     
     const binaryString = atob(base64Audio);
     const len = binaryString.length;
