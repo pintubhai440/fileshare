@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+// Changed import path from alias '@/' back to relative '../' to fix build error
 import { sendChatMessage, transcribeAudio, generateSpeech } from '../services/geminiService';
 import { ChatMessage } from '../types';
 
