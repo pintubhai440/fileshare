@@ -54,7 +54,7 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
 
 /**
  * 1. Smart Chatbot with Thinking Budget & Google Search
- * Uses: gemini-3-pro-preview
+ * Uses: gemini-2.5-flash
  */
 export const sendChatMessage = async (
   history: { role: string; parts: { text: string }[] }[],
@@ -76,7 +76,7 @@ export const sendChatMessage = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro', // Correct Model Name
+      model: 'gemini-2.5-flash', // Correct Model Name
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
