@@ -9,6 +9,10 @@ export const ChatBot: React.FC = () => {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  
+  // Track which message is currently playing audio
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -26,7 +30,6 @@ export const ChatBot: React.FC = () => {
     setIsLoading(true);
 
     try {
-      // Prepare history for API
       const history = messages.map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
@@ -51,11 +54,9 @@ export const ChatBot: React.FC = () => {
 
   const handleVoiceInput = async () => {
     if (isRecording) {
-      // Stop Recording
       mediaRecorderRef.current?.stop();
       setIsRecording(false);
     } else {
-      // Start Recording
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const mediaRecorder = new MediaRecorder(stream);
@@ -63,13 +64,10 @@ export const ChatBot: React.FC = () => {
         audioChunksRef.current = [];
 
         mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            audioChunksRef.current.push(event.data);
-          }
+          if (event.data.size > 0) audioChunksRef.current.push(event.data);
         };
 
         mediaRecorder.onstop = async () => {
-          // Use the actual mime type of the recorder, default to webm if missing
           const mimeType = mediaRecorder.mimeType || 'audio/webm';
           const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
           
@@ -82,7 +80,6 @@ export const ChatBot: React.FC = () => {
             setInput("Could not transcribe audio.");
           } finally {
             setIsLoading(false);
-            // Stop all tracks to release mic
             stream.getTracks().forEach(track => track.stop());
           }
         };
@@ -96,20 +93,42 @@ export const ChatBot: React.FC = () => {
     }
   };
 
-  const playTTS = async (text: string) => {
+  // ✅ FIXED TTS FUNCTION
+  const playTTS = async (text: string, msgId: string) => {
     try {
+      // 1. Show Loading State
+      setPlayingMessageId(msgId);
+      
       const audioBuffer = await generateSpeech(text);
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const audioContext = new AudioContextClass();
+      
+      // 2. Critical Fix: Resume AudioContext if browser suspended it
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+
       const source = audioContext.createBufferSource();
       
-      // Decode the raw buffer
       audioContext.decodeAudioData(audioBuffer, (buffer) => {
         source.buffer = buffer;
         source.connect(audioContext.destination);
+        
+        // Reset state when audio finishes
+        source.onended = () => setPlayingMessageId(null);
+        
         source.start(0);
-      }, (e) => console.error("Error decoding audio data", e));
+      }, (e) => {
+        console.error("Error decoding audio data", e);
+        setPlayingMessageId(null);
+        alert("Error playing audio. Format not supported.");
+      });
+
     } catch (e) {
       console.error("Audio playback failed", e);
+      setPlayingMessageId(null);
+      alert("Failed to generate speech. Please check console.");
     }
   };
 
@@ -121,7 +140,7 @@ export const ChatBot: React.FC = () => {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
           Smart Assistant
         </h3>
-        <span className="text-xs bg-white/20 px-2 py-0.5 rounded text-white">Gemini 3 Pro</span>
+        <span className="text-xs bg-white/20 px-2 py-0.5 rounded text-white">Gemini 2.5 Pro</span>
       </div>
 
       {/* Messages */}
@@ -152,11 +171,29 @@ export const ChatBot: React.FC = () => {
               {/* TTS Button for Bot */}
               {msg.role === 'model' && (
                 <button 
-                  onClick={() => playTTS(msg.text)}
-                  className="mt-2 text-xs opacity-60 hover:opacity-100 flex items-center gap-1 hover:text-blue-300 transition-colors"
+                  onClick={() => playTTS(msg.text, msg.id)}
+                  disabled={playingMessageId !== null && playingMessageId !== msg.id} // Disable other buttons while one plays
+                  className={`mt-2 text-xs flex items-center gap-1 transition-colors ${
+                    playingMessageId === msg.id 
+                      ? 'text-green-400 font-bold' 
+                      : 'opacity-60 hover:opacity-100 hover:text-blue-300'
+                  }`}
                 >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
-                  Read Aloud
+                  {playingMessageId === msg.id ? (
+                     <>
+                       <div className="flex space-x-1">
+                         <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-bounce"></div>
+                         <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-bounce delay-100"></div>
+                         <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-bounce delay-200"></div>
+                       </div>
+                       <span className="ml-1">Playing...</span>
+                     </>
+                  ) : (
+                     <>
+                       <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" /></svg>
+                       Read Aloud
+                     </>
+                  )}
                 </button>
               )}
             </div>
