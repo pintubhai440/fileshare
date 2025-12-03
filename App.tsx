@@ -21,7 +21,7 @@ const App: React.FC = () => {
   // Send State
   const [fileToSend, setFileToSend] = useState<File | null>(null);
   const [transferProgress, setTransferProgress] = useState(0);
-  const [transferSpeed, setTransferSpeed] = useState<string>('0 MB/s');
+  const [transferSpeed, setTransferSpeed] = useState<string>('0.0 MB/s'); // ✅ Speed State
 
   // Receive State
   const [remotePeerId, setRemotePeerId] = useState('');
@@ -32,16 +32,15 @@ const App: React.FC = () => {
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const bytesReceivedRef = useRef(0);
   const lastUpdateRef = useRef(0);
-  const lastBytesRef = useRef(0);
+  const lastBytesRef = useRef(0); // ✅ Speed Calculation Ref
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
 
-  // Chat Widget State
   const [isChatOpen, setIsChatOpen] = useState(false);
 
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // Config: Maximum Throughput
+    // Config: Maximum Buffer for 5MB Chunks
     const peer = new Peer(shortId, { 
         debug: 0, 
         config: {
@@ -67,7 +66,7 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC (Optimized for Huge Chunks) ---
+  // --- RECEIVER LOGIC (With Live Speedometer) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
@@ -78,24 +77,24 @@ const App: React.FC = () => {
         bytesReceivedRef.current += data.byteLength;
         
         const now = Date.now();
-        // Update UI slightly slower (300ms) to save CPU for handling 5MB chunks
+        // Update UI every 300ms (To handle 5MB chunks load)
         if (now - lastUpdateRef.current > 300 && receivedFileMetaRef.current) {
             const totalSize = receivedFileMetaRef.current.size;
             const percent = Math.min(100, Math.round((bytesReceivedRef.current / totalSize) * 100));
             
-            // Speed Calculation
-            const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
-            const timeDiff = (now - lastUpdateRef.current) / 1000; 
-            const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+            // 🔥 SPEED CALCULATION FORMULA
+            const timeDiff = (now - lastUpdateRef.current) / 1000; // Time in seconds
+            const bytesDiff = bytesReceivedRef.current - lastBytesRef.current; // Data received since last update
+            const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024); // Convert to MB/s
             
             setTransferProgress(percent);
-            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`); // ✅ Show Speed
             
             lastUpdateRef.current = now;
             lastBytesRef.current = bytesReceivedRef.current;
         }
       } 
-      // 2. Metadata
+      // 2. Metadata (Start)
       else if (data.type === 'meta') {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
@@ -112,9 +111,8 @@ const App: React.FC = () => {
       // 3. End of File
       else if (data.type === 'end') {
         setTransferProgress(100);
-        setTransferSpeed('Finalizing...');
+        setTransferSpeed('Finalizing...'); // Processing large file
         
-        // Give more time (100ms) for UI to settle before heavy Blob creation
         setTimeout(() => {
             if (receivedFileMetaRef.current) {
                 const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
@@ -130,15 +128,16 @@ const App: React.FC = () => {
     conn.on('close', () => {
       setConnectionStatus('Connection Closed');
       setTransferProgress(0);
+      setTransferSpeed('0.0 MB/s');
     });
   };
 
-  // --- SENDER LOGIC (5MB EXTREME MODE) ---
+  // --- SENDER LOGIC (5MB Chunks + Flow Control) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
       setTransferProgress(0);
-      setTransferSpeed('0 MB/s');
+      setTransferSpeed('0.0 MB/s');
     }
   };
 
@@ -166,8 +165,8 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
     
-    // 🔥 EXTREME MODE: 5MB Chunks
-    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+    // 🔥 5MB CHUNK SIZE (As Requested)
+    const CHUNK_SIZE = 5 * 1024 * 1024; 
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -186,8 +185,9 @@ const App: React.FC = () => {
         if (now - lastUpdateRef.current > 300) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
              
-             const bytesDiff = offset - lastBytesRef.current;
+             // Speed Calc for Sender too
              const timeDiff = (now - lastUpdateRef.current) / 1000;
+             const bytesDiff = offset - lastBytesRef.current;
              const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
 
              setTransferProgress(progress);
@@ -202,23 +202,20 @@ const App: React.FC = () => {
         } else {
            conn.send({ type: 'end' });
            setTransferProgress(100);
-           setTransferSpeed('Sent');
+           setTransferSpeed('Sent!');
         }
       } catch (err) {
-        console.warn("Buffer full, pausing...", err);
+        console.warn("Buffer full, pausing...");
         setTimeout(readNextChunk, 100);
       }
     };
 
     const readNextChunk = () => {
-      // 🛑 SAFETY BRAKE SYSTEM (Critical for 5MB Chunks)
-      // Chrome Buffer Limit = ~16MB
-      // We are sending 5MB chunks.
-      // So, buffer must be BELOW 10MB before sending next chunk.
-      // If buffer is > 10MB, pause immediately.
-      
-      if (conn.dataChannel.bufferedAmount > 10 * 1024 * 1024) {
-          setTimeout(readNextChunk, 50); // Check again in 50ms
+      // 🛑 SAFETY BRAKE for 5MB Chunks
+      // Chrome crashes if buffer > 16MB. 
+      // We wait if buffer > 8MB to keep it safe for next 5MB chunk.
+      if (conn.dataChannel.bufferedAmount > 8 * 1024 * 1024) {
+          setTimeout(readNextChunk, 50); 
           return;
       }
       
@@ -237,7 +234,7 @@ const App: React.FC = () => {
 
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare </span>
+           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare (5MB + Speedometer)</span>
            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
              Status: <span className="text-green-400">{connectionStatus}</span>
            </div>
@@ -283,9 +280,10 @@ const App: React.FC = () => {
 
               {transferProgress > 0 && (
                 <div className="w-full space-y-2">
-                    <div className="flex justify-between text-xs text-gray-400">
+                    <div className="flex justify-between text-xs text-gray-400 px-1">
                         <span>Sending...</span>
-                        <span className="text-green-400 font-mono">{transferSpeed}</span>
+                        {/* ✅ SENDER SPEED DISPLAY */}
+                        <span className="text-green-400 font-mono font-bold">{transferSpeed}</span>
                     </div>
                     <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden relative">
                         <div className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200" style={{ width: `${transferProgress}%` }}></div>
@@ -317,7 +315,8 @@ const App: React.FC = () => {
                    <div className="mt-4 space-y-2">
                        <div className="flex justify-between text-xs text-gray-400 px-1">
                            <span>Progress</span>
-                           <span className="text-green-400 font-mono">{transferSpeed}</span>
+                           {/* ✅ RECEIVER SPEED DISPLAY */}
+                           <span className="text-green-400 font-mono font-bold animate-pulse">{transferSpeed}</span>
                        </div>
                        <div className="w-full bg-gray-600 rounded-full h-3 overflow-hidden">
                            <div className="bg-green-500 h-full transition-all duration-200 shadow-[0_0_10px_rgba(34,197,94,0.5)]" style={{ width: `${transferProgress}%` }}></div>
