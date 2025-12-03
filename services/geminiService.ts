@@ -186,12 +186,12 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 
 /**
  * 4. Text-to-Speech
- * Uses: gemini-2.5-flash-preview-tts
+ * Uses: gemini-2.5-flash
  */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
+      model: "gemini-2.5-flash",
       contents: [{ parts: [{ text }] }],
       config: {
         responseModalities: [Modality.AUDIO],
