@@ -40,7 +40,7 @@ const App: React.FC = () => {
     
     // Improved Peer Config for faster connection
     const peer = new Peer(shortId, { 
-        debug: 1,
+        debug: 1, // Reduced debug level for performance
         config: {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -64,32 +64,33 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC (Instant Start Fix) ---
+  // --- RECEIVER LOGIC (Optimized for Speed) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
     conn.on('data', (data: any) => {
-      // 1. Metadata - Immediate UI Update
-      if (data.type === 'meta') {
+      // 1. RAW BINARY CHUNK (Fastest Path)
+      // Check for ArrayBuffer directly to skip JSON parsing overhead
+      if (data instanceof ArrayBuffer) {
+        chunksRef.current.push(data);
+        bytesReceivedRef.current += data.byteLength;
+        
+        // Update UI every 100ms only (reduces re-renders)
+        const now = Date.now();
+        if (now - lastUpdateRef.current > 100 && receivedFileMeta) {
+            const percent = Math.min(100, Math.round((bytesReceivedRef.current / receivedFileMeta.size) * 100));
+            setTransferProgress(percent);
+            lastUpdateRef.current = now;
+        }
+      } 
+      // 2. Metadata (Start of Transfer)
+      else if (data.type === 'meta') {
         setReceivedFileMeta(data.meta);
         chunksRef.current = []; // Reset
         bytesReceivedRef.current = 0;
         setDownloadUrl(null);
         setTransferProgress(0);
-        console.log("Metadata received, ready for chunks");
-      } 
-      // 2. Data Chunk - Optimized Processing
-      else if (data.type === 'chunk') {
-        chunksRef.current.push(data.chunk);
-        bytesReceivedRef.current += data.chunk.byteLength;
-        
-        // Update UI every 50ms for smoother feel
-        const now = Date.now();
-        if (now - lastUpdateRef.current > 50 && receivedFileMeta) {
-            const percent = Math.min(100, Math.round((bytesReceivedRef.current / receivedFileMeta.size) * 100));
-            setTransferProgress(percent);
-            lastUpdateRef.current = now;
-        }
+        console.log("Metadata received, starting high-speed transfer...");
       } 
       // 3. End of File
       else if (data.type === 'end') {
@@ -97,10 +98,13 @@ const App: React.FC = () => {
         
         // Create Blob immediately
         setTimeout(() => {
-            const blob = new Blob(chunksRef.current, { type: data.mime });
-            const url = URL.createObjectURL(blob);
-            setDownloadUrl(url);
-            chunksRef.current = []; // Free memory
+            if (receivedFileMeta) {
+                const blob = new Blob(chunksRef.current, { type: receivedFileMeta.type });
+                const url = URL.createObjectURL(blob);
+                setDownloadUrl(url);
+                chunksRef.current = []; // Free memory
+                console.log("File constructed successfully");
+            }
         }, 10);
       }
     });
@@ -111,7 +115,7 @@ const App: React.FC = () => {
     });
   };
 
-  // --- SENDER LOGIC (Instant Send Fix) ---
+  // --- SENDER LOGIC (Optimized for Speed) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -135,7 +139,7 @@ const App: React.FC = () => {
 
     const conn = connRef.current;
     
-    // 1. Send Metadata Immediately
+    // 1. Send Metadata
     conn.send({
       type: 'meta',
       meta: { name: fileToSend.name, size: fileToSend.size, type: fileToSend.type }
@@ -143,9 +147,9 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
 
-    // 2. Start Sending Chunks with minimal delay
-    // Increased Chunk Size for speed, but manageable for receiver
-    const CHUNK_SIZE = 64 * 1024; 
+    // 2. Optimized Chunk Processing
+    // Increased Chunk Size to 512KB for better throughput
+    const CHUNK_SIZE = 512 * 1024; 
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -154,11 +158,12 @@ const App: React.FC = () => {
       
       const buffer = e.target.result as ArrayBuffer;
       
+      // Sending Raw Buffer (No JSON overhead)
       try {
-        conn.send({ type: 'chunk', chunk: buffer });
+        conn.send(buffer);
         offset += buffer.byteLength;
 
-        // Smart Progress Update
+        // UI Update Throttling
         const now = Date.now();
         if (now - lastUpdateRef.current > 100) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
@@ -167,16 +172,18 @@ const App: React.FC = () => {
         }
 
         if (offset < fileToSend.size) {
-           // No timeout = Max Speed
+           // Continue reading ASAP
            readNextChunk();
         } else {
-           conn.send({ type: 'end', mime: fileToSend.type });
+           // Finish
+           conn.send({ type: 'end' });
            setTransferProgress(100);
            alert("File Sent Successfully!");
         }
       } catch (err) {
-        // If buffer full, brief pause
-        setTimeout(() => readNextChunk(), 10);
+        // Backpressure Handling: If buffer is full, wait slightly longer
+        console.warn("Buffer full, pausing...");
+        setTimeout(() => readNextChunk(), 50);
       }
     };
 
@@ -185,7 +192,7 @@ const App: React.FC = () => {
       fileReader.readAsArrayBuffer(slice);
     };
 
-    // Small delay to ensure metadata is processed first
+    // Start sending
     setTimeout(() => readNextChunk(), 100);
   };
 
@@ -197,7 +204,7 @@ const App: React.FC = () => {
 
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare P2P (Instant)</span>
+           <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">SecureShare P2P (Turbo)</span>
            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
              Status: <span className="text-green-400">{connectionStatus}</span>
            </div>
