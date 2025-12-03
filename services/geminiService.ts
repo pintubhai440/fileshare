@@ -61,15 +61,31 @@ export const sendChatMessage = async (
   message: string
 ) => {
   try {
+    // 1. AI ko batao ki wo kaun hai (System Instruction)
+    const systemInstruction = `
+      You are the intelligent assistant for 'SecureShare AI', a secure P2P file transfer platform.
+      
+      YOUR KNOWLEDGE BASE:
+      - **Identity**: You are the SecureShare AI Bot (NOT a generic Google assistant).
+      - **How it works**: Uses WebRTC (PeerJS) for direct Device-to-Device transfer. NO SERVERS involved.
+      - **Storage Policy**: WE DO NOT STORE FILES. Files fly directly from sender to receiver.
+      - **Privacy**: Data is 100% private. It exists only in browser RAM.
+      - **Deletion**: Files are "deleted" instantly when the tab is closed or transfer ends because they were never uploaded to a cloud.
+      
+      TONE: Helpful, technical, and concise.
+    `;
+
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-pro',
+      model: 'gemini-2.0-flash', // Correct Model Name
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
       ],
       config: {
-        thinkingConfig: { thinkingBudget: 32768 }, // Max thinking for complex queries
-        tools: [{ googleSearch: {} }], // Grounding
+        systemInstruction: {
+            parts: [{ text: systemInstruction }]
+        },
+        tools: [{ googleSearch: {} }], 
       }
     });
 
@@ -85,12 +101,11 @@ export const sendChatMessage = async (
   } catch (error: any) {
     console.error("Chat Error:", error);
     return {
-      text: "I encountered an error processing your request.",
+      text: "I encountered an error. Please check your internet or API key.",
       urls: []
     };
   }
 };
-
 /**
  * 2. Analyze Image/Video Content
  * Uses: gemini-3-pro-preview
