@@ -76,7 +76,7 @@ export const sendChatMessage = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash', // Correct Model Name
+      model: 'gemini-2.5-pro', // Correct Model Name
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
