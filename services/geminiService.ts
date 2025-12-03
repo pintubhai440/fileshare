@@ -54,7 +54,7 @@ export const sendChatMessage = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', // Using stable Flash model
+      model: 'gemini-2.5-pro', // Using stable Flash model
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
@@ -97,7 +97,7 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
     const filePart = await fileToGenerativePart(file);
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-pro',
       contents: {
         parts: [
           filePart,
@@ -125,7 +125,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
           const base64data = (reader.result as string).split(',')[1];
           
           const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-2.5-pro',
             contents: {
               parts: [
                 { inlineData: { mimeType: audioBlob.type || 'audio/wav', data: base64data } },
@@ -150,7 +150,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash", // Switch to reliable Flash model
+      model: "gemini-2.0-pro-exp", // Switch to reliable Flash model
       contents: [{ 
         parts: [{ text: `Read this aloud naturally (audio only): "${text}"` }] 
       }],
