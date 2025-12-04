@@ -26,7 +26,6 @@ const App: React.FC = () => {
   // Receive State
   const [remotePeerId, setRemotePeerId] = useState('');
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
-  // Download URL hata diya kyunki ab hum direct save karenge
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   
   // High Performance Refs
@@ -66,14 +65,21 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC ---
+  // --- RECEIVER LOGIC (Fixed Data Type Check) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
     conn.on('data', (data: any) => {
-      if (data instanceof ArrayBuffer) {
-        chunksRef.current.push(data);
-        bytesReceivedRef.current += data.byteLength;
+      // ✅ FIX: Check for BOTH ArrayBuffer and Uint8Array
+      // Sometimes browsers send Uint8Array instead of ArrayBuffer
+      const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
+
+      if (isBinary) {
+        // Convert Uint8Array to ArrayBuffer if needed
+        const buffer = data instanceof Uint8Array ? data.buffer : data;
+        
+        chunksRef.current.push(buffer);
+        bytesReceivedRef.current += buffer.byteLength;
         
         const now = Date.now();
         if (now - lastUpdateRef.current > 300 && receivedFileMetaRef.current) {
@@ -100,15 +106,14 @@ const App: React.FC = () => {
         lastBytesRef.current = 0;
         lastUpdateRef.current = Date.now();
         
-        setIsTransferComplete(false); // Reset complete flag
+        setIsTransferComplete(false);
         setTransferProgress(0);
         setTransferSpeed('Starting...');
       } 
       else if (data.type === 'end') {
         setTransferProgress(100);
         setTransferSpeed('Completed');
-        setIsTransferComplete(true); // Show Save Button
-        // Note: We do NOT create Blob here anymore to prevent freezing
+        setIsTransferComplete(true);
       }
     });
 
@@ -118,7 +123,7 @@ const App: React.FC = () => {
     });
   };
 
-  // --- SENDER LOGIC ---
+  // --- SENDER LOGIC (5MB Chunks) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -150,8 +155,7 @@ const App: React.FC = () => {
 
     setTransferProgress(1);
     
-    // 5MB Chunks
-    const CHUNK_SIZE = 5 * 1024 * 1024; 
+    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB Chunks
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -196,7 +200,6 @@ const App: React.FC = () => {
           setTimeout(readNextChunk, 50); 
           return;
       }
-      
       const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
       fileReader.readAsArrayBuffer(slice);
     };
@@ -204,50 +207,63 @@ const App: React.FC = () => {
     readNextChunk();
   };
 
-  // --- 🔥 SMART SAVE FUNCTION (Fixes Download Failed) ---
+  // --- 🔥 ROBUST SAVE FUNCTION ---
   const handleSaveFile = async () => {
-      if (!receivedFileMetaRef.current || chunksRef.current.length === 0) {
-          alert("No file data to save!");
+      // Recovery: If Ref is missing but State exists, use State
+      const meta = receivedFileMetaRef.current || receivedFileMeta;
+
+      if (!meta) {
+          alert("Error: File metadata missing. Please try sending again.");
+          return;
+      }
+      
+      if (chunksRef.current.length === 0) {
+          alert("Error: No file data received yet. Did the transfer finish?");
           return;
       }
 
-      setTransferSpeed('Saving...');
+      setTransferSpeed('Saving to Disk...');
 
       try {
-          // 1. Try Modern "Save As" Dialog (Direct Disk Write)
-          // @ts-ignore - TypeScript might not know this API yet
+          // 1. Try Modern File System Access API (Chrome/Edge)
+          // @ts-ignore
           if (window.showSaveFilePicker) {
               const handle = await window.showSaveFilePicker({
-                  suggestedName: receivedFileMetaRef.current.name,
+                  suggestedName: meta.name,
               });
               const writable = await handle.createWritable();
-              const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
+              const blob = new Blob(chunksRef.current, { type: meta.type });
               await writable.write(blob);
               await writable.close();
-              setTransferSpeed('Saved!');
-              // Only clear memory after successful save
-              if (confirm("File saved successfully! Clear memory?")) {
+              
+              setTransferSpeed('Saved Successfully!');
+              
+              if (confirm("File saved! Clear memory to receive new files?")) {
                   chunksRef.current = [];
                   setReceivedFileMeta(null);
+                  receivedFileMetaRef.current = null;
                   setIsTransferComplete(false);
+                  setTransferProgress(0);
               }
           } else {
-              // 2. Fallback for older browsers (Standard Download)
-              throw new Error("Use fallback");
+              throw new Error("API not supported");
           }
       } catch (err) {
-          // Fallback: Create Blob URL (Might fail for >2GB, but best option without API)
-          console.log("Using fallback download...");
-          const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
+          // 2. Fallback for Mobile/Firefox (Standard Download)
+          console.log("Using standard download fallback");
+          const blob = new Blob(chunksRef.current, { type: meta.type });
           const url = URL.createObjectURL(blob);
+          
           const a = document.createElement('a');
           a.href = url;
-          a.download = receivedFileMetaRef.current.name;
+          a.download = meta.name;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          setTransferSpeed('Saved (Fallback)');
+          
+          // Small delay before revoking to ensure mobile browsers catch it
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          setTransferSpeed('Saved (Standard)');
       }
   };
 
@@ -354,7 +370,7 @@ const App: React.FC = () => {
                    onClick={handleSaveFile}
                    className="block w-full bg-green-600 hover:bg-green-500 py-4 rounded-xl font-bold shadow-lg mt-4 animate-bounce text-white"
                  >
-                   Save File Now (Disk Write) 💾
+                   Save File Now (Safe Mode) 💾
                  </button>
                ) : (
                   !receivedFileMeta && <div className="text-gray-500 text-sm mt-4">Keep this tab open while receiving</div>
