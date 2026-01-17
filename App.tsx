@@ -27,13 +27,14 @@ const App: React.FC = () => {
   const [remotePeerId, setRemotePeerId] = useState('');
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [isTransferComplete, setIsTransferComplete] = useState(false);
+  const [isMotorReady, setIsMotorReady] = useState(false);
   
   // High Performance Refs
-  const chunksRef = useRef<ArrayBuffer[]>([]);
   const bytesReceivedRef = useRef(0);
   const lastUpdateRef = useRef(0);
   const lastBytesRef = useRef(0);
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
+  const writableStreamRef = useRef<any | null>(null); // For Direct Disk Writing
 
   const [isChatOpen, setIsChatOpen] = useState(false);
 
@@ -65,52 +66,64 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- RECEIVER LOGIC (Fixed Data Type Check) ---
+  // --- PROGRESS CALCULATOR ---
+  const updateProgressUI = (currentBytes: number, totalSize: number) => {
+    const now = Date.now();
+    if (now - lastUpdateRef.current > 300) {
+        const percent = Math.min(100, Math.round((currentBytes / totalSize) * 100));
+        const bytesDiff = currentBytes - lastBytesRef.current;
+        const timeDiff = (now - lastUpdateRef.current) / 1000;
+        const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+        
+        setTransferProgress(percent);
+        setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+        
+        lastUpdateRef.current = now;
+        lastBytesRef.current = currentBytes;
+    }
+  };
+
+  // --- RECEIVER LOGIC (Direct Disk Write) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
-    conn.on('data', (data: any) => {
-      // ✅ FIX: Check for BOTH ArrayBuffer and Uint8Array
-      // Sometimes browsers send Uint8Array instead of ArrayBuffer
+    conn.on('data', async (data: any) => {
       const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
 
-      if (isBinary) {
-        // Convert Uint8Array to ArrayBuffer if needed
+      // 1. Binary Data Handling (Writing to Disk)
+      if (isBinary && writableStreamRef.current) {
         const buffer = data instanceof Uint8Array ? data.buffer : data;
+        await writableStreamRef.current.write(buffer);
         
-        chunksRef.current.push(buffer);
         bytesReceivedRef.current += buffer.byteLength;
-        
-        const now = Date.now();
-        if (now - lastUpdateRef.current > 300 && receivedFileMetaRef.current) {
-            const totalSize = receivedFileMetaRef.current.size;
-            const percent = Math.min(100, Math.round((bytesReceivedRef.current / totalSize) * 100));
-            
-            const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
-            const timeDiff = (now - lastUpdateRef.current) / 1000;
-            const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-            
-            setTransferProgress(percent);
-            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-            
-            lastUpdateRef.current = now;
-            lastBytesRef.current = bytesReceivedRef.current;
+        if (receivedFileMetaRef.current) {
+            updateProgressUI(bytesReceivedRef.current, receivedFileMetaRef.current.size);
         }
       } 
+      // 2. Metadata Handling
       else if (data.type === 'meta') {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        chunksRef.current = []; 
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
         lastUpdateRef.current = Date.now();
         
+        setIsMotorReady(false);
         setIsTransferComplete(false);
         setTransferProgress(0);
-        setTransferSpeed('Starting...');
+        setTransferSpeed('Waiting for disk permission...');
       } 
+      // 3. Transfer Ready Handshake (For Sender side)
+      else if (data.type === 'ready_to_receive') {
+        startPumping();
+      }
+      // 4. End of Transfer
       else if (data.type === 'end') {
+        if (writableStreamRef.current) {
+            await writableStreamRef.current.close();
+            writableStreamRef.current = null;
+        }
         setTransferProgress(100);
         setTransferSpeed('Completed');
         setIsTransferComplete(true);
@@ -123,15 +136,31 @@ const App: React.FC = () => {
     });
   };
 
-  // --- SENDER LOGIC (5MB Chunks) ---
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFileToSend(e.target.files[0]);
-      setTransferProgress(0);
-      setTransferSpeed('0.0 MB/s');
+  // --- PREPARE MOTOR (Confirm & Select Location) ---
+  const prepareMotor = async () => {
+    if (!receivedFileMetaRef.current || !connRef.current) return;
+
+    try {
+        // @ts-ignore
+        if (window.showSaveFilePicker) {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: receivedFileMetaRef.current.name,
+            });
+            writableStreamRef.current = await handle.createWritable();
+            setIsMotorReady(true);
+            setTransferSpeed('Motor Ready ⚡');
+            
+            // Tell sender we are ready
+            connRef.current.send({ type: 'ready_to_receive' });
+        } else {
+            alert("Your browser doesn't support Fast Mode. Please use Chrome or Edge.");
+        }
+    } catch (err) {
+        console.error("User cancelled or error occurred", err);
     }
   };
 
+  // --- SENDER LOGIC (Optimized Pumping) ---
   const connectToPeer = () => {
     if (!remotePeerId || !peerRef.current) return;
     setConnectionStatus(`Connecting...`);
@@ -146,16 +175,19 @@ const App: React.FC = () => {
       return;
     }
 
-    const conn = connRef.current;
-    
-    conn.send({
+    // Phase 1: Send Metadata
+    connRef.current.send({
       type: 'meta',
       meta: { name: fileToSend.name, size: fileToSend.size, type: fileToSend.type }
     });
+    setTransferSpeed('Waiting for receiver...');
+  };
 
-    setTransferProgress(1);
-    
-    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB Chunks
+  const startPumping = () => {
+    if (!fileToSend || !connRef.current) return;
+
+    const conn = connRef.current;
+    const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB Optimized Chunks
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -169,26 +201,14 @@ const App: React.FC = () => {
       try {
         conn.send(buffer);
         offset += buffer.byteLength;
-
-        const now = Date.now();
-        if (now - lastUpdateRef.current > 300) {
-             const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
-             const bytesDiff = offset - lastBytesRef.current;
-             const timeDiff = (now - lastUpdateRef.current) / 1000;
-             const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-
-             setTransferProgress(progress);
-             setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-             lastUpdateRef.current = now;
-             lastBytesRef.current = offset;
-        }
+        updateProgressUI(offset, fileToSend.size);
 
         if (offset < fileToSend.size) {
            readNextChunk();
         } else {
            conn.send({ type: 'end' });
            setTransferProgress(100);
-           setTransferSpeed('Sent');
+           setTransferSpeed('Sent Successfully');
         }
       } catch (err) {
         setTimeout(readNextChunk, 100);
@@ -196,7 +216,8 @@ const App: React.FC = () => {
     };
 
     const readNextChunk = () => {
-      if (conn.dataChannel.bufferedAmount > 10 * 1024 * 1024) {
+      // Flow Control: Don't overwhelm the buffer
+      if (conn.dataChannel.bufferedAmount > 64 * 1024 * 1024) {
           setTimeout(readNextChunk, 50); 
           return;
       }
@@ -205,66 +226,6 @@ const App: React.FC = () => {
     };
 
     readNextChunk();
-  };
-
-  // --- 🔥 ROBUST SAVE FUNCTION ---
-  const handleSaveFile = async () => {
-      // Recovery: If Ref is missing but State exists, use State
-      const meta = receivedFileMetaRef.current || receivedFileMeta;
-
-      if (!meta) {
-          alert("Error: File metadata missing. Please try sending again.");
-          return;
-      }
-      
-      if (chunksRef.current.length === 0) {
-          alert("Error: No file data received yet. Did the transfer finish?");
-          return;
-      }
-
-      setTransferSpeed('Saving to Disk...');
-
-      try {
-          // 1. Try Modern File System Access API (Chrome/Edge)
-          // @ts-ignore
-          if (window.showSaveFilePicker) {
-              const handle = await window.showSaveFilePicker({
-                  suggestedName: meta.name,
-              });
-              const writable = await handle.createWritable();
-              const blob = new Blob(chunksRef.current, { type: meta.type });
-              await writable.write(blob);
-              await writable.close();
-              
-              setTransferSpeed('Saved Successfully!');
-              
-              if (confirm("File saved! Clear memory to receive new files?")) {
-                  chunksRef.current = [];
-                  setReceivedFileMeta(null);
-                  receivedFileMetaRef.current = null;
-                  setIsTransferComplete(false);
-                  setTransferProgress(0);
-              }
-          } else {
-              throw new Error("API not supported");
-          }
-      } catch (err) {
-          // 2. Fallback for Mobile/Firefox (Standard Download)
-          console.log("Using standard download fallback");
-          const blob = new Blob(chunksRef.current, { type: meta.type });
-          const url = URL.createObjectURL(blob);
-          
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = meta.name;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          
-          // Small delay before revoking to ensure mobile browsers catch it
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-          setTransferSpeed('Saved (Standard)');
-      }
   };
 
   return (
@@ -285,8 +246,8 @@ const App: React.FC = () => {
       <main className="relative z-10 container mx-auto px-4 py-12 flex flex-col items-center">
         
         <div className="bg-gray-800 p-1 rounded-xl inline-flex mb-8 shadow-lg border border-gray-700">
-          <button onClick={() => setActiveTab(Tab.SEND)} className={`px-8 py-3 rounded-lg ${activeTab === Tab.SEND ? 'bg-blue-600 text-white' : 'text-gray-400'}`}>I want to SEND</button>
-          <button onClick={() => setActiveTab(Tab.RECEIVE)} className={`px-8 py-3 rounded-lg ${activeTab === Tab.RECEIVE ? 'bg-purple-600 text-white' : 'text-gray-400'}`}>I want to RECEIVE</button>
+          <button onClick={() => setActiveTab(Tab.SEND)} className={`px-8 py-3 rounded-lg transition-all ${activeTab === Tab.SEND ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}>I want to SEND</button>
+          <button onClick={() => setActiveTab(Tab.RECEIVE)} className={`px-8 py-3 rounded-lg transition-all ${activeTab === Tab.RECEIVE ? 'bg-purple-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}>I want to RECEIVE</button>
         </div>
 
         <div className="mb-8 text-center">
@@ -300,8 +261,8 @@ const App: React.FC = () => {
           
           {activeTab === Tab.SEND && (
             <div className="space-y-6">
-              <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500">
-                <input type="file" onChange={handleFileSelect} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+              <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500 transition-colors">
+                <input type="file" onChange={(e) => setFileToSend(e.target.files?.[0] || null)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                 <div className="space-y-2">
                     <p className="text-xl font-medium">{fileToSend ? fileToSend.name : "Select File to Send"}</p>
                     {fileToSend && <p className="text-xs text-gray-400">{(fileToSend.size / (1024*1024)).toFixed(2)} MB</p>}
@@ -316,18 +277,18 @@ const App: React.FC = () => {
                    onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
                    className="bg-transparent flex-1 outline-none text-white font-mono uppercase"
                  />
-                 <button onClick={connectToPeer} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm">Connect</button>
+                 <button onClick={connectToPeer} className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm transition-colors">Connect</button>
               </div>
 
               {transferProgress > 0 && (
                 <div className="w-full space-y-2">
                     <div className="flex justify-between text-xs text-gray-400 px-1">
-                        <span>Sending...</span>
+                        <span>{transferProgress === 100 ? 'Finished' : 'Sending...'}</span>
                         <span className="text-green-400 font-mono font-bold">{transferSpeed}</span>
                     </div>
                     <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden relative">
                         <div className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200" style={{ width: `${transferProgress}%` }}></div>
-                        <p className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white drop-shadow-md">{transferProgress}%</p>
+                        <p className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white">{transferProgress}%</p>
                     </div>
                 </div>
               )}
@@ -335,7 +296,7 @@ const App: React.FC = () => {
               <button 
                 onClick={sendFile} 
                 disabled={!fileToSend || connectionStatus.includes('Initializing')}
-                className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50"
+                className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50 transition-all transform active:scale-[0.98]"
               >
                 Send Instantly 🚀
               </button>
@@ -345,36 +306,43 @@ const App: React.FC = () => {
           {activeTab === Tab.RECEIVE && (
              <div className="space-y-6 text-center">
                <h2 className="text-2xl font-bold">Ready to Receive</h2>
-               <p className="text-gray-400">Your ID: <span className="text-yellow-400 font-mono font-bold text-lg">{myPeerId}</span></p>
-
-               {receivedFileMeta && (
-                 <div className="bg-gray-700/50 p-4 rounded-xl mt-4">
-                   <p className="font-bold text-lg text-blue-300">Receiving: {receivedFileMeta.name}</p>
-                   <p className="text-sm text-gray-400">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB</p>
+               
+               {!receivedFileMeta ? (
+                 <div className="py-12 border-2 border-dashed border-gray-700 rounded-2xl">
+                    <p className="text-gray-500">Waiting for sender to select a file...</p>
+                 </div>
+               ) : (
+                 <div className="bg-gray-700/50 p-6 rounded-xl mt-4 border border-blue-500/30">
+                   <p className="font-bold text-xl text-blue-300 mb-1">{receivedFileMeta.name}</p>
+                   <p className="text-sm text-gray-400 mb-4">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB</p>
                    
-                   <div className="mt-4 space-y-2">
+                   <div className="space-y-4">
                        <div className="flex justify-between text-xs text-gray-400 px-1">
                            <span>Progress</span>
-                           <span className="text-green-400 font-mono font-bold animate-pulse">{transferSpeed}</span>
+                           <span className="text-green-400 font-mono font-bold">{transferSpeed}</span>
                        </div>
                        <div className="w-full bg-gray-600 rounded-full h-3 overflow-hidden">
                            <div className="bg-green-500 h-full transition-all duration-200 shadow-[0_0_10px_rgba(34,197,94,0.5)]" style={{ width: `${transferProgress}%` }}></div>
                        </div>
-                       <p className="text-xs text-right text-gray-300 font-bold">{transferProgress}%</p>
                    </div>
+
+                   {!isMotorReady && !isTransferComplete && (
+                    <button 
+                        onClick={prepareMotor}
+                        className="w-full bg-green-600 hover:bg-green-500 py-4 rounded-xl font-bold shadow-lg mt-6 animate-pulse text-white transition-all"
+                    >
+                        Confirm & Start Receiving 💾
+                    </button>
+                   )}
+
+                   {isTransferComplete && (
+                    <div className="mt-6 p-3 bg-green-500/20 border border-green-500/50 rounded-lg text-green-400 font-bold">
+                        ✅ File Saved to Disk
+                    </div>
+                   )}
                  </div>
                )}
-
-               {isTransferComplete ? (
-                 <button 
-                   onClick={handleSaveFile}
-                   className="block w-full bg-green-600 hover:bg-green-500 py-4 rounded-xl font-bold shadow-lg mt-4 animate-bounce text-white"
-                 >
-                   Save File Now (Safe Mode) 💾
-                 </button>
-               ) : (
-                  !receivedFileMeta && <div className="text-gray-500 text-sm mt-4">Keep this tab open while receiving</div>
-               )}
+               <p className="text-xs text-gray-500">Keep this tab active for maximum speed</p>
              </div>
           )}
 
@@ -384,14 +352,16 @@ const App: React.FC = () => {
        {/* Chat Widget */}
        <div className="fixed bottom-6 right-6 z-50">
         {!isChatOpen && (
-          <button onClick={() => setIsChatOpen(true)} className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white">
-             💬
+          <button onClick={() => setIsChatOpen(true)} className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white text-2xl hover:scale-110 transition-transform">
+              💬
           </button>
         )}
         {isChatOpen && (
-          <div className="w-[350px] h-[500px] flex flex-col relative">
-            <button onClick={() => setIsChatOpen(false)} className="absolute -top-3 -right-3 w-8 h-8 bg-gray-700 text-white rounded-full flex items-center justify-center shadow-lg z-10">X</button>
-            <ChatBot />
+          <div className="w-[350px] h-[500px] flex flex-col relative animate-in slide-in-from-bottom-5">
+            <button onClick={() => setIsChatOpen(false)} className="absolute -top-3 -right-3 w-8 h-8 bg-gray-700 text-white rounded-full flex items-center justify-center shadow-lg z-10 hover:bg-red-500 transition-colors">✕</button>
+            <div className="h-full rounded-2xl overflow-hidden shadow-2xl border border-white/10">
+                <ChatBot />
+            </div>
           </div>
         )}
       </div>
