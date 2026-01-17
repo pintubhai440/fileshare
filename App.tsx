@@ -239,19 +239,28 @@ const App: React.FC = () => {
   const startPumping = (conn: DataConnection) => {
     if (!fileToSend) return;
 
-    // 1. Chunk Size: 64KB (WebRTC ka favourite size)
-    // Chote packets packet-loss hone par jaldi recover hote hain
-    const CHUNK_SIZE = 64 * 1024; 
-
-    // 2. Buffer Limit: 16MB (Pipe ko thusa-thusa ke bhare rakhna hai)
-    // Agar ye kam hua (e.g. 1MB), to speed 0.2MB/s ho jayegi.
-    const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024;
+    // BEST SETTINGS FOR MAX SPEED:
+    const CHUNK_SIZE = 64 * 1024; // 64KB रखें
+    const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
+    const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
+    const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
 
     const fileReader = new FileReader();
     let offset = 0;
 
     lastUpdateRef.current = Date.now();
     lastBytesRef.current = 0;
+
+    // Ye function tab tak check karega jab tak buffer thoda khali nahi hota
+    const waitForDrain = () => {
+      if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
+        // Buffer 4MB तक खाली हो गया, वापस attack करो!
+        readNextChunk();
+      } else {
+        // अभी भी full है, 2ms बाद check करो
+        setTimeout(waitForDrain, POLLING_INTERVAL);
+      }
+    };
 
     fileReader.onload = (e) => {
       if (!e.target?.result) return;
@@ -265,31 +274,31 @@ const App: React.FC = () => {
         // UI Update Logic (Har 300ms pe update, taaki CPU free rahe)
         const now = Date.now();
         if (now - lastUpdateRef.current > 300) {
-             const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
-             const bytesDiff = offset - lastBytesRef.current;
-             const timeDiff = (now - lastUpdateRef.current) / 1000;
-             if (timeDiff > 0) {
-                 const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-                 setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-             }
-             setTransferProgress(progress);
-             lastUpdateRef.current = now;
-             lastBytesRef.current = offset;
+          const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
+          const bytesDiff = offset - lastBytesRef.current;
+          const timeDiff = (now - lastUpdateRef.current) / 1000;
+          if (timeDiff > 0) {
+            const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+          }
+          setTransferProgress(progress);
+          lastUpdateRef.current = now;
+          lastBytesRef.current = offset;
         }
 
         if (offset < fileToSend.size) {
-           // 🔥 CRITICAL LOOP LOGIC 🔥
-           // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
-           if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-               readNextChunk(); 
-           } else {
-               // Agar buffer full hai, to wait karo
-               waitForDrain();
-           }
+          // 🔥 CRITICAL LOOP LOGIC 🔥
+          // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
+          if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
+            readNextChunk();
+          } else {
+            // Agar buffer full hai, to wait karo
+            waitForDrain();
+          }
         } else {
-           conn.send({ type: 'end' });
-           setTransferProgress(100);
-           setTransferSpeed('Sent');
+          conn.send({ type: 'end' });
+          setTransferProgress(100);
+          setTransferSpeed('Sent');
         }
       } catch (err) {
         console.error("Error sending, retrying...", err);
@@ -300,17 +309,6 @@ const App: React.FC = () => {
     const readNextChunk = () => {
       const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
       fileReader.readAsArrayBuffer(slice);
-    };
-
-    // Ye function tab tak check karega jab tak buffer thoda khali nahi hota
-    const waitForDrain = () => {
-        if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT / 2) {
-            // Buffer aadha khali ho gaya, wapas attack karo!
-            readNextChunk();
-        } else {
-            // Abhi bhi full hai, 5ms baad check karo
-            setTimeout(waitForDrain, 5);
-        }
     };
 
     // Engine Start
