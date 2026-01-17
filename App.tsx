@@ -240,7 +240,7 @@ const App: React.FC = () => {
   const startPumping = (conn: DataConnection) => {
     if (!fileToSend) return;
     
-    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB Chunks
+    const CHUNK_SIZE = 10 * 1024 * 1024; // 5MB Chunks
     const fileReader = new FileReader();
     let offset = 0;
     
