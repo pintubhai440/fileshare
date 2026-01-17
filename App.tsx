@@ -28,6 +28,8 @@ const App: React.FC = () => {
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
+  // 👇 NEW STATE: To track if file is safely on disk
+  const [isFileSaved, setIsFileSaved] = useState(false);
   
   // High Performance Refs
   const chunksRef = useRef<ArrayBuffer[]>([]);
@@ -104,6 +106,7 @@ const App: React.FC = () => {
         
         setIsTransferComplete(false);
         setIsMotorReady(false);
+        setIsFileSaved(false); // Reset saved status
         setTransferProgress(0);
         setTransferSpeed('Starting...');
         
@@ -117,6 +120,7 @@ const App: React.FC = () => {
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
+          setIsFileSaved(true); // ✅ Fix: Mark as saved so button hides
         }
         setTransferProgress(100);
         setTransferSpeed('Completed');
@@ -133,19 +137,23 @@ const App: React.FC = () => {
     });
   };
 
-  // 🔥 MOTOR - Prepare file system for streaming
+  // 🔥 MOTOR - Prepare file system for streaming (UPDATED FIX)
   const prepareMotor = async () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
+    
+    const meta = receivedFileMetaRef.current;
 
     // Check if browser supports File System Access API
     // @ts-ignore
     if (window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({
-          suggestedName: receivedFileMetaRef.current.name,
+          suggestedName: meta.name,
           types: [{
-            description: 'All Files',
-            accept: { '*/*': [] }
+            description: 'File Transfer',
+            accept: {
+              [meta.type]: [] // ✅ Fix: Explicitly tell Windows the file type
+            }
           }]
         });
         writableStreamRef.current = await handle.createWritable();
@@ -305,7 +313,7 @@ const App: React.FC = () => {
 
       try {
           // If we already used motor, file is already saved
-          if (writableStreamRef.current) {
+          if (writableStreamRef.current || isFileSaved) {
               setTransferSpeed('Already Saved via Motor ⚡');
               return;
           }
@@ -316,13 +324,22 @@ const App: React.FC = () => {
           
           const a = document.createElement('a');
           a.href = url;
-          a.download = meta.name;
+          
+          // ✅ Fix: Add extension if missing (Fixes White Icon Bug)
+          if (!meta.name.includes('.')) {
+              const ext = meta.type.split('/')[1] || 'bin'; 
+              a.download = `${meta.name}.${ext}`;
+          } else {
+              a.download = meta.name;
+          }
+
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
           
           setTimeout(() => URL.revokeObjectURL(url), 1000);
           setTransferSpeed('Saved (Standard)');
+          setIsFileSaved(true);
           
       } catch (err) {
           console.error("Save failed:", err);
@@ -439,8 +456,8 @@ const App: React.FC = () => {
                      </button>
                    )}
 
-                   {/* Fallback Save Button (for non-motor or if motor not supported) */}
-                   {isTransferComplete && !writableStreamRef.current && (
+                   {/* Fallback Save Button - Only show if NOT saved */}
+                   {isTransferComplete && !writableStreamRef.current && !isFileSaved && (
                      <button 
                        onClick={handleSaveFile}
                        className="mt-4 block w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-xl font-bold shadow-lg"
@@ -449,11 +466,11 @@ const App: React.FC = () => {
                      </button>
                    )}
 
-                   {/* Already Saved with Motor */}
-                   {isTransferComplete && writableStreamRef.current && (
+                   {/* Already Saved Message */}
+                   {isTransferComplete && (writableStreamRef.current || isFileSaved) && (
                      <div className="mt-4 p-3 bg-cyan-900/30 border border-cyan-700 rounded-xl">
-                       <p className="text-cyan-300 font-bold">✓ File already saved with Motor!</p>
-                       <p className="text-xs text-cyan-400 mt-1">No need to save again</p>
+                       <p className="text-cyan-300 font-bold">✓ File saved directly to disk!</p>
+                       <p className="text-xs text-cyan-400 mt-1">Check your downloads folder</p>
                      </div>
                    )}
                  </div>
@@ -475,7 +492,7 @@ const App: React.FC = () => {
        <div className="fixed bottom-6 right-6 z-50">
         {!isChatOpen && (
           <button onClick={() => setIsChatOpen(true)} className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white">
-             💬
+              💬
           </button>
         )}
         {isChatOpen && (
