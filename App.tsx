@@ -244,7 +244,7 @@ const App: React.FC = () => {
 
     // 🔥 BIG CHUNK SIZE: 20 MB
     // This reduces overhead by 300x compared to 64KB chunks.
-    const CHUNK_SIZE = 13 * 1024 * 1024; 
+    const CHUNK_SIZE = 8 * 1024 * 1024; 
     
     const fileReader = new FileReader();
     let offset = 0;
