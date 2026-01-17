@@ -44,6 +44,7 @@ const App: React.FC = () => {
   const [isChatOpen, setIsChatOpen] = useState(false);
 
   useEffect(() => {
+    // Short ID generation
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
     const peer = new Peer(shortId, { 
@@ -82,12 +83,19 @@ const App: React.FC = () => {
       if (isBinary) {
         const buffer = data instanceof Uint8Array ? data.buffer : data;
         
-        // 🔥 MOTOR MODE: Stream directly to disk
+        // 🔥 MOTOR MODE: Stream directly to disk (Critical for 15GB+ files)
         if (writableStreamRef.current) {
-          await writableStreamRef.current.write(buffer);
-          bytesReceivedRef.current += buffer.byteLength;
+          try {
+             await writableStreamRef.current.write(buffer);
+             bytesReceivedRef.current += buffer.byteLength;
+          } catch (err) {
+             console.error("Write error:", err);
+             // Stop transfer if write fails to prevent data corruption
+             conn.close(); 
+             setConnectionStatus("Write Error - Transfer Stopped");
+          }
         } else {
-          // Fallback: Store in memory
+          // Fallback: Store in memory (Only for small files, risk of crash on large files)
           chunksRef.current.push(buffer);
           bytesReceivedRef.current += buffer.byteLength;
         }
@@ -112,15 +120,19 @@ const App: React.FC = () => {
         
         // Close any existing stream
         if (writableStreamRef.current) {
-          await writableStreamRef.current.close();
+          try {
+            await writableStreamRef.current.close();
+          } catch (e) { console.error("Error closing old stream", e); }
           writableStreamRef.current = null;
         }
       } 
       else if (data.type === 'end') {
         if (writableStreamRef.current) {
-          await writableStreamRef.current.close();
-          writableStreamRef.current = null;
-          setIsFileSaved(true); // ✅ Fix: Mark as saved so button hides
+          try {
+            await writableStreamRef.current.close();
+            writableStreamRef.current = null;
+            setIsFileSaved(true); // ✅ Fix: Mark as saved so button hides
+          } catch (e) { console.error("Error closing stream on end", e); }
         }
         setTransferProgress(100);
         setTransferSpeed('Completed');
@@ -134,6 +146,11 @@ const App: React.FC = () => {
     conn.on('close', () => {
       setConnectionStatus('Connection Closed');
       setTransferProgress(0);
+      // Ensure stream is closed if connection drops
+      if (writableStreamRef.current) {
+         writableStreamRef.current.close().catch(e => console.error(e));
+         writableStreamRef.current = null;
+      }
     });
   };
 
@@ -174,28 +191,33 @@ const App: React.FC = () => {
     }
   };
 
-  // Progress update function
+  // Progress update function (Throttled for Performance)
   const updateProgress = () => {
     if (!receivedFileMetaRef.current) return;
 
     const now = Date.now();
-    if (now - lastUpdateRef.current < 300) return;
+    // Throttle UI updates to 200ms (balanced for smooth UI but low CPU usage)
+    if (now - lastUpdateRef.current < 200) return;
 
     const total = receivedFileMetaRef.current.size;
     const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
 
     const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
     const timeDiff = (now - lastUpdateRef.current) / 1000;
-    const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+    
+    // Protect against division by zero
+    if (timeDiff > 0) {
+        const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+        setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+    }
 
     setTransferProgress(percent);
-    setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
 
     lastUpdateRef.current = now;
     lastBytesRef.current = bytesReceivedRef.current;
   };
 
-  // --- SENDER LOGIC (5MB Chunks) ---
+  // --- SENDER LOGIC (Optimized Chunks) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -240,10 +262,14 @@ const App: React.FC = () => {
     });
   };
 
+  // 🚀 CORE SPEED FIX: Optimized Pumping Logic
   const startPumping = (conn: DataConnection) => {
     if (!fileToSend) return;
 
-    const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB Chunks
+    // FIX 1: Smaller Chunk Size (64KB - 256KB is the sweet spot for WebRTC)
+    // 5MB was too big, causing GC pauses and RAM spikes.
+    const CHUNK_SIZE = 64 * 1024; 
+    
     const fileReader = new FileReader();
     let offset = 0;
     
@@ -258,15 +284,17 @@ const App: React.FC = () => {
         conn.send(buffer);
         offset += buffer.byteLength;
 
+        // Efficient Progress Calculation
         const now = Date.now();
-        if (now - lastUpdateRef.current > 300) {
+        if (now - lastUpdateRef.current > 200) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
              const bytesDiff = offset - lastBytesRef.current;
              const timeDiff = (now - lastUpdateRef.current) / 1000;
-             const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-
+             if (timeDiff > 0) {
+                 const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+                 setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+             }
              setTransferProgress(progress);
-             setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
              lastUpdateRef.current = now;
              lastBytesRef.current = offset;
         }
@@ -279,13 +307,17 @@ const App: React.FC = () => {
            setTransferSpeed('Sent');
         }
       } catch (err) {
+        // Retry logic with small backoff
         setTimeout(readNextChunk, 100);
       }
     };
 
     const readNextChunk = () => {
-      if (conn.dataChannel.bufferedAmount > 10 * 1024 * 1024) {
-          setTimeout(readNextChunk, 50); 
+      // FIX 2: Optimized Backpressure
+      // Check buffer limit (16MB). If full, wait ONLY 10ms (not 50ms).
+      // This keeps the pipe full but prevents crashing.
+      if (conn.dataChannel.bufferedAmount > 16 * 1024 * 1024) {
+          setTimeout(readNextChunk, 10); 
           return;
       }
       const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
