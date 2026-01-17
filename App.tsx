@@ -37,6 +37,7 @@ const App: React.FC = () => {
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
   const [isFileSaved, setIsFileSaved] = useState(false);
+  const [isProcessingFile, setIsProcessingFile] = useState(false); // New Flag
   
   // High Performance Refs
   const chunksRef = useRef<BlobPart[]>([]);
@@ -99,7 +100,7 @@ const App: React.FC = () => {
   const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
   const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
 
-  // Receiver Logic (FIXED FOR CORRUPTION)
+  // --- RECEIVER LOGIC ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => {
       setConnectionStatus(`Connected securely to ${conn.peer}`);
@@ -113,7 +114,7 @@ const App: React.FC = () => {
       const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
       
       if (isBinary) {
-        // FIX: Critical Data Handling
+        // Handle File Data
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         
         // Motor Mode: Stream directly to disk
@@ -128,19 +129,24 @@ const App: React.FC = () => {
         updateProgress();
       } 
       else if (data.type === 'meta') {
+        // Handle New File Request
+        console.log("Meta received for:", data.meta.name);
+        setIsProcessingFile(true); // Flag to block UI flickering
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        // Reset everything for new file
+        // Reset State for New File
         chunksRef.current = [];
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
         lastUpdateRef.current = Date.now();
+        
+        // Crucial: Reset these to force UI to show "Confirm" button
         setIsTransferComplete(false);
-        setIsMotorReady(false);
+        setIsMotorReady(false); 
         setIsFileSaved(false);
         setTransferProgress(0);
-        setTransferSpeed('Starting...');
+        setTransferSpeed('Waiting for confirmation...');
         
         // Initialize transfer stats
         transferStatsRef.current = {
@@ -157,6 +163,8 @@ const App: React.FC = () => {
         }
       } 
       else if (data.type === 'end') {
+        // Handle File Completion
+        console.log("File transfer ended. Closing stream...");
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
@@ -165,12 +173,16 @@ const App: React.FC = () => {
         setTransferProgress(100);
         setTransferSpeed('Completed');
         setIsTransferComplete(true);
-        
+        setIsProcessingFile(false);
+
         // Calculate final stats
         const totalTime = (Date.now() - transferStatsRef.current.startTime) / 1000;
         const avgSpeed = (bytesReceivedRef.current / totalTime) / (1024 * 1024);
         transferStatsRef.current.averageSpeed = avgSpeed;
-      } 
+        
+        // 🔥 CRITICAL FIX: Tell Sender we are ready for the next file
+        conn.send({ type: 'transfer_complete_ack' });
+      }
       else if (data.type === 'ready_to_receive') {
         // Sender is ready
       }
@@ -230,7 +242,7 @@ const App: React.FC = () => {
     if (!receivedFileMetaRef.current) return;
     
     const now = Date.now();
-    if (now - lastUpdateRef.current < 300) return;
+    if (now - lastUpdateRef.current < 200) return; // Throttle to 200ms
     
     const total = receivedFileMetaRef.current.size;
     const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
@@ -254,6 +266,53 @@ const App: React.FC = () => {
     
     lastUpdateRef.current = now;
     lastBytesRef.current = bytesReceivedRef.current;
+  };
+
+  // Save Function (Fallback for non-motor mode)
+  const handleSaveFile = async () => {
+    const meta = receivedFileMetaRef.current || receivedFileMeta;
+    if (!meta) {
+      alert("Error: File metadata missing.");
+      return;
+    }
+    
+    if (chunksRef.current.length === 0 && !writableStreamRef.current) {
+      alert("Error: No file data received.");
+      return;
+    }
+    
+    setTransferSpeed('Saving to Disk...');
+    
+    try {
+      if (writableStreamRef.current || isFileSaved) {
+        setTransferSpeed('Already Saved via Motor ⚡');
+        return;
+      }
+      
+      // Safe Blob Creation
+      const blob = new Blob(chunksRef.current, { type: meta.type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      if (!meta.name.includes('.')) {
+        const ext = meta.type.split('/')[1] || 'bin';
+        a.download = `${meta.name}.${ext}`;
+      } else {
+        a.download = meta.name;
+      }
+      
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTransferSpeed('Saved (Standard)');
+      setIsFileSaved(true);
+    } catch (err) {
+      console.error("Save failed:", err);
+      setTransferSpeed('Save Failed');
+    }
   };
 
   // Sender Logic
@@ -288,6 +347,7 @@ const App: React.FC = () => {
     processFileQueue(0);
   };
 
+  // Recursive Queue Processor with Acknowledgment Wait
   const processFileQueue = (index: number) => {
     if (index >= filesQueue.length) {
       setTransferSpeed('All Files Sent Successfully! 🎉');
@@ -297,6 +357,8 @@ const App: React.FC = () => {
     const file = filesQueue[index];
     setCurrentFileIndex(index);
     const conn = connRef.current!;
+
+    console.log(`Starting file ${index + 1}: ${file.name}`);
 
     // 1. Send file metadata
     conn.send({
@@ -311,26 +373,30 @@ const App: React.FC = () => {
     setTransferProgress(1);
     setTransferSpeed(`Waiting for receiver to accept: ${file.name}...`);
 
-    // 2. Wait for 'ready_to_receive' for THIS file
-    const onReady = (data: any) => {
+    // 2. Setup One-Time Listener for this specific file transfer
+    const handleTransferStep = (data: any) => {
       if (data.type === 'ready_to_receive') {
-        conn.off('data', onReady);
+        console.log("Receiver ready, pumping data...");
+        // Start sending data
+        startPumping(conn, file);
+      }
+      else if (data.type === 'transfer_complete_ack') {
+        console.log("Receiver confirmed save. Moving to next file...");
+        // Cleanup listener and move to next file
+        conn.off('data', handleTransferStep);
         
-        // 3. Start Pumping this file
-        startPumping(conn, file, () => {
-          // 4. On Complete, trigger next file
-          setTimeout(() => {
-            processFileQueue(index + 1);
-          }, 500);
-        });
+        // Small delay to ensure UI updates
+        setTimeout(() => {
+          processFileQueue(index + 1);
+        }, 500);
       }
     };
 
-    conn.on('data', onReady);
+    conn.on('data', handleTransferStep);
   };
 
   // 🔥 AGGRESSIVE SPEED ENGINE with BEST SETTINGS
-  const startPumping = (conn: DataConnection, file: File, onComplete: () => void) => {
+  const startPumping = (conn: DataConnection, file: File) => {
     // BEST SETTINGS FOR MAX SPEED:
     const CHUNK_SIZE = 64 * 1024; // 64KB रखें
     const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
@@ -403,17 +469,12 @@ const App: React.FC = () => {
             waitForDrain();
           }
         } else {
+          // Finished sending file data
+          console.log("Data sent, sending END signal...");
           conn.send({ type: 'end' });
           setTransferProgress(100);
-          setTransferSpeed('Sent');
-          
-          // Calculate final average speed
-          const totalTime = (Date.now() - senderStats.startTime) / 1000;
-          senderStats.averageSpeed = (file.size / totalTime) / (1024 * 1024);
-          
-          console.log(`File sent: ${file.name}, Avg Speed: ${senderStats.averageSpeed.toFixed(1)} MB/s, Peak: ${senderStats.peakSpeed.toFixed(1)} MB/s`);
-          
-          onComplete();
+          setTransferSpeed('Waiting for save confirmation...');
+          // Note: We DO NOT call next file here. We wait for 'transfer_complete_ack'
         }
       } catch (err) {
         console.error("Error sending, retrying...", err);
@@ -427,53 +488,6 @@ const App: React.FC = () => {
     };
 
     readNextChunk();
-  };
-
-  // Save Function (Fallback for non-motor mode)
-  const handleSaveFile = async () => {
-    const meta = receivedFileMetaRef.current || receivedFileMeta;
-    if (!meta) {
-      alert("Error: File metadata missing.");
-      return;
-    }
-    
-    if (chunksRef.current.length === 0 && !writableStreamRef.current) {
-      alert("Error: No file data received.");
-      return;
-    }
-    
-    setTransferSpeed('Saving to Disk...');
-    
-    try {
-      if (writableStreamRef.current || isFileSaved) {
-        setTransferSpeed('Already Saved via Motor ⚡');
-        return;
-      }
-      
-      // Safe Blob Creation
-      const blob = new Blob(chunksRef.current, { type: meta.type });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      
-      if (!meta.name.includes('.')) {
-        const ext = meta.type.split('/')[1] || 'bin';
-        a.download = `${meta.name}.${ext}`;
-      } else {
-        a.download = meta.name;
-      }
-      
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setTransferSpeed('Saved (Standard)');
-      setIsFileSaved(true);
-    } catch (err) {
-      console.error("Save failed:", err);
-      setTransferSpeed('Save Failed');
-    }
   };
 
   // Drag and drop support
@@ -708,7 +722,7 @@ const App: React.FC = () => {
                             </div>
 
                             {!isMotorReady && !isTransferComplete && (
-                                <button onClick={prepareMotor} className="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold text-white shadow-lg shadow-green-500/20 transition-all flex items-center justify-center gap-2">
+                                <button onClick={prepareMotor} className="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold text-white shadow-lg shadow-green-500/20 transition-all flex items-center justify-center gap-2 animate-bounce">
                                     <span>⚡</span> Enable High-Speed Save
                                 </button>
                             )}
