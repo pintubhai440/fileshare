@@ -28,15 +28,18 @@ const App: React.FC = () => {
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
-  // 👇 NEW STATE: To track if file is safely on disk
   const [isFileSaved, setIsFileSaved] = useState(false);
   
   // High Performance Refs
-  const chunksRef = useRef<ArrayBuffer[]>([]);
+  const chunksRef = useRef<ArrayBuffer[]>([]); 
   const bytesReceivedRef = useRef(0);
   const lastUpdateRef = useRef(0);
   const lastBytesRef = useRef(0);
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
+  
+  // 🔥 NEW: Buffer Tracking for Disk Writing
+  const diskWriteBufferRef = useRef<number>(0); 
+  const DISK_FLUSH_THRESHOLD = 4 * 1024 * 1024; // 4MB Buffer (Sweet Spot)
 
   // 🔥 MOTOR - File System Access API
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
@@ -44,7 +47,6 @@ const App: React.FC = () => {
   const [isChatOpen, setIsChatOpen] = useState(false);
 
   useEffect(() => {
-    // Short ID generation
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
     const peer = new Peer(shortId, { 
@@ -72,32 +74,25 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- UPDATED RECEIVER LOGIC WITH MOTOR ---
+  // --- UPDATED RECEIVER LOGIC (HYBRID BATCHING) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
     conn.on('data', async (data: any) => {
-      // Check for BOTH ArrayBuffer and Uint8Array
       const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
 
       if (isBinary) {
         const buffer = data instanceof Uint8Array ? data.buffer : data;
         
-        // 🔥 MOTOR MODE: Stream directly to disk (Critical for 15GB+ files)
-        if (writableStreamRef.current) {
-          try {
-             await writableStreamRef.current.write(buffer);
-             bytesReceivedRef.current += buffer.byteLength;
-          } catch (err) {
-             console.error("Write error:", err);
-             // Stop transfer if write fails to prevent data corruption
-             conn.close(); 
-             setConnectionStatus("Write Error - Transfer Stopped");
-          }
-        } else {
-          // Fallback: Store in memory (Only for small files, risk of crash on large files)
-          chunksRef.current.push(buffer);
-          bytesReceivedRef.current += buffer.byteLength;
+        // 1. Always push to Memory Buffer first (Fastest)
+        chunksRef.current.push(buffer);
+        const chunkSize = buffer.byteLength;
+        bytesReceivedRef.current += chunkSize;
+        diskWriteBufferRef.current += chunkSize;
+        
+        // 2. 🔥 INTELLIGENT FLUSHING: Write to disk only when buffer > 4MB
+        if (writableStreamRef.current && diskWriteBufferRef.current >= DISK_FLUSH_THRESHOLD) {
+            await flushToDisk();
         }
         
         updateProgress();
@@ -106,47 +101,49 @@ const App: React.FC = () => {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        // Reset everything
+        // Reset Logic
         chunksRef.current = []; 
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
+        diskWriteBufferRef.current = 0;
         lastUpdateRef.current = Date.now();
         
         setIsTransferComplete(false);
         setIsMotorReady(false);
-        setIsFileSaved(false); // Reset saved status
+        setIsFileSaved(false);
         setTransferProgress(0);
         setTransferSpeed('Starting...');
         
-        // Close any existing stream
         if (writableStreamRef.current) {
-          try {
-            await writableStreamRef.current.close();
-          } catch (e) { console.error("Error closing old stream", e); }
+          try { await writableStreamRef.current.close(); } catch(e){}
           writableStreamRef.current = null;
         }
       } 
       else if (data.type === 'end') {
+        // Write any remaining data in buffer
+        if (writableStreamRef.current && chunksRef.current.length > 0) {
+            await flushToDisk();
+        }
+
         if (writableStreamRef.current) {
           try {
             await writableStreamRef.current.close();
             writableStreamRef.current = null;
-            setIsFileSaved(true); // ✅ Fix: Mark as saved so button hides
-          } catch (e) { console.error("Error closing stream on end", e); }
+            setIsFileSaved(true);
+          } catch (e) { console.error("Close Error", e); }
         }
+        
         setTransferProgress(100);
         setTransferSpeed('Completed');
         setIsTransferComplete(true);
       }
       else if (data.type === 'ready_to_receive') {
-        // Sender is ready, we already handled this in prepareMotor
+          // Handled elsewhere
       }
     });
 
     conn.on('close', () => {
       setConnectionStatus('Connection Closed');
-      setTransferProgress(0);
-      // Ensure stream is closed if connection drops
       if (writableStreamRef.current) {
          writableStreamRef.current.close().catch(e => console.error(e));
          writableStreamRef.current = null;
@@ -154,49 +151,55 @@ const App: React.FC = () => {
     });
   };
 
-  // 🔥 MOTOR - Prepare file system for streaming (UPDATED FIX)
+  // Helper: Efficiently writes accumulated buffer to disk
+  const flushToDisk = async () => {
+      if (!writableStreamRef.current || chunksRef.current.length === 0) return;
+
+      try {
+          // Combine all small chunks into one big Blob
+          const blob = new Blob(chunksRef.current);
+          
+          // Write Big Chunk (Efficient I/O)
+          await writableStreamRef.current.write(blob);
+          
+          // Clear Memory immediately
+          chunksRef.current = [];
+          diskWriteBufferRef.current = 0;
+      } catch (err) {
+          console.error("Disk Write Error", err);
+          setConnectionStatus("Disk Write Error");
+      }
+  };
+
   const prepareMotor = async () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
-    
     const meta = receivedFileMetaRef.current;
 
-    // Check if browser supports File System Access API
     // @ts-ignore
     if (window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({
           suggestedName: meta.name,
-          types: [{
-            description: 'File Transfer',
-            accept: {
-              [meta.type]: [] // ✅ Fix: Explicitly tell Windows the file type
-            }
-          }]
+          types: [{ description: 'File Transfer', accept: { [meta.type]: [] } }]
         });
         writableStreamRef.current = await handle.createWritable();
         setIsMotorReady(true);
         setTransferSpeed('Motor Ready ⚡');
-        
-        // Notify sender we're ready
         connRef.current.send({ type: 'ready_to_receive' });
       } catch (err) {
-        console.log("User cancelled file save dialog");
         setTransferSpeed('Save cancelled');
       }
     } else {
-      // Fallback mode
       setIsMotorReady(true);
       connRef.current.send({ type: 'ready_to_receive' });
-      setTransferSpeed('Ready (Fallback Mode)');
     }
   };
 
-  // Progress update function (Throttled for Performance)
   const updateProgress = () => {
     if (!receivedFileMetaRef.current) return;
-
     const now = Date.now();
-    // Throttle UI updates to 200ms (balanced for smooth UI but low CPU usage)
+    
+    // Throttle Updates (200ms)
     if (now - lastUpdateRef.current < 200) return;
 
     const total = receivedFileMetaRef.current.size;
@@ -205,19 +208,16 @@ const App: React.FC = () => {
     const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
     const timeDiff = (now - lastUpdateRef.current) / 1000;
     
-    // Protect against division by zero
     if (timeDiff > 0) {
         const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
         setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
     }
 
     setTransferProgress(percent);
-
     lastUpdateRef.current = now;
     lastBytesRef.current = bytesReceivedRef.current;
   };
 
-  // --- SENDER LOGIC (Optimized Chunks) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -239,36 +239,23 @@ const App: React.FC = () => {
       alert("No connection or file!");
       return;
     }
-
     const conn = connRef.current;
-    
-    // Send file metadata
     conn.send({
       type: 'meta',
-      meta: { 
-        name: fileToSend.name, 
-        size: fileToSend.size, 
-        type: fileToSend.type 
-      }
+      meta: { name: fileToSend.name, size: fileToSend.size, type: fileToSend.type }
     });
-
     setTransferProgress(1);
-    
-    // Wait for receiver to confirm they're ready
     conn.on('data', (data: any) => {
-      if (data.type === 'ready_to_receive') {
-        startPumping(conn);
-      }
+      if (data.type === 'ready_to_receive') startPumping(conn);
     });
   };
 
-  // 🚀 CORE SPEED FIX: Optimized Pumping Logic
   const startPumping = (conn: DataConnection) => {
     if (!fileToSend) return;
 
-    // FIX 1: Smaller Chunk Size (64KB - 256KB is the sweet spot for WebRTC)
-    // 5MB was too big, causing GC pauses and RAM spikes.
-    const CHUNK_SIZE = 64 * 1024; 
+    // 🔥 FIX: Increased Chunk Size to 256KB
+    // 64KB was causing CPU bottlenecks. 256KB is the sweet spot.
+    const CHUNK_SIZE = 256 * 1024; 
     
     const fileReader = new FileReader();
     let offset = 0;
@@ -284,7 +271,6 @@ const App: React.FC = () => {
         conn.send(buffer);
         offset += buffer.byteLength;
 
-        // Efficient Progress Calculation
         const now = Date.now();
         if (now - lastUpdateRef.current > 200) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
@@ -307,15 +293,12 @@ const App: React.FC = () => {
            setTransferSpeed('Sent');
         }
       } catch (err) {
-        // Retry logic with small backoff
         setTimeout(readNextChunk, 100);
       }
     };
 
     const readNextChunk = () => {
-      // FIX 2: Optimized Backpressure
-      // Check buffer limit (16MB). If full, wait ONLY 10ms (not 50ms).
-      // This keeps the pipe full but prevents crashing.
+      // Keep Backpressure check, but with larger chunks it triggers less often
       if (conn.dataChannel.bufferedAmount > 16 * 1024 * 1024) {
           setTimeout(readNextChunk, 10); 
           return;
@@ -327,52 +310,27 @@ const App: React.FC = () => {
     readNextChunk();
   };
 
-  // --- SAVE FUNCTION (Fallback for non-motor mode) ---
   const handleSaveFile = async () => {
       const meta = receivedFileMetaRef.current || receivedFileMeta;
-
-      if (!meta) {
-          alert("Error: File metadata missing. Please try sending again.");
-          return;
-      }
-      
-      if (chunksRef.current.length === 0 && !writableStreamRef.current) {
-          alert("Error: No file data received yet. Did the transfer finish?");
-          return;
-      }
+      if (!meta) return;
 
       setTransferSpeed('Saving to Disk...');
-
       try {
-          // If we already used motor, file is already saved
           if (writableStreamRef.current || isFileSaved) {
               setTransferSpeed('Already Saved via Motor ⚡');
               return;
           }
-
-          // Fallback: Use standard download
           const blob = new Blob(chunksRef.current, { type: meta.type });
           const url = URL.createObjectURL(blob);
-          
           const a = document.createElement('a');
           a.href = url;
-          
-          // ✅ Fix: Add extension if missing (Fixes White Icon Bug)
-          if (!meta.name.includes('.')) {
-              const ext = meta.type.split('/')[1] || 'bin'; 
-              a.download = `${meta.name}.${ext}`;
-          } else {
-              a.download = meta.name;
-          }
-
+          a.download = meta.name;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          
           setTimeout(() => URL.revokeObjectURL(url), 1000);
           setTransferSpeed('Saved (Standard)');
           setIsFileSaved(true);
-          
       } catch (err) {
           console.error("Save failed:", err);
           setTransferSpeed('Save Failed');
@@ -488,7 +446,7 @@ const App: React.FC = () => {
                      </button>
                    )}
 
-                   {/* Fallback Save Button - Only show if NOT saved */}
+                   {/* Fallback Save Button */}
                    {isTransferComplete && !writableStreamRef.current && !isFileSaved && (
                      <button 
                        onClick={handleSaveFile}
@@ -498,7 +456,6 @@ const App: React.FC = () => {
                      </button>
                    )}
 
-                   {/* Already Saved Message */}
                    {isTransferComplete && (writableStreamRef.current || isFileSaved) && (
                      <div className="mt-4 p-3 bg-cyan-900/30 border border-cyan-700 rounded-xl">
                        <p className="text-cyan-300 font-bold">✓ File saved directly to disk!</p>
