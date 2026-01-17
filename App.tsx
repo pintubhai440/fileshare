@@ -30,9 +30,10 @@ const App: React.FC = () => {
   const [receivePreview, setReceivePreview] = useState<string | null>(null);
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
+  const [chunkCount, setChunkCount] = useState(0); 
   
   const bytesReceivedRef = useRef(0);
-  const chunksRef = useRef<Uint8Array[]>([]); // To create a preview for the receiver
+  const chunksForPreviewRef = useRef<Uint8Array[]>([]); 
   const lastUpdateRef = useRef(0);
   const lastBytesRef = useRef(0);
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
@@ -77,7 +78,8 @@ const App: React.FC = () => {
         setIsMotorReady(false);
         setIsTransferComplete(false);
         setTransferProgress(0);
-        chunksRef.current = []; // Reset chunks for new file
+        setChunkCount(0);
+        chunksForPreviewRef.current = []; 
         setReceivePreview(null);
       } 
       else if (data.type === 'ready_to_receive') {
@@ -87,14 +89,15 @@ const App: React.FC = () => {
       else if ((data instanceof ArrayBuffer || data instanceof Uint8Array)) {
         const buffer = data instanceof Uint8Array ? data.buffer : data;
         
-        // Write to disk if stream is ready
         if (writableStreamRef.current) {
             await writableStreamRef.current.write(buffer);
         }
 
-        // Store small preview if it's an image (only first 2MB for preview to save memory)
-        if (receivedFileMetaRef.current?.type.startsWith('image/') && chunksRef.current.length < 5) {
-            chunksRef.current.push(new Uint8Array(buffer));
+        setChunkCount(prev => prev + 1);
+
+        // Preview only for images to keep memory clean
+        if (receivedFileMetaRef.current?.type.startsWith('image/') && chunksForPreviewRef.current.length < 5) {
+            chunksForPreviewRef.current.push(new Uint8Array(buffer));
         }
 
         bytesReceivedRef.current += buffer.byteLength;
@@ -108,9 +111,8 @@ const App: React.FC = () => {
             writableStreamRef.current = null;
         }
         
-        // Generate Receive Preview if image
         if (receivedFileMetaRef.current?.type.startsWith('image/')) {
-            const blob = new Blob(chunksRef.current, { type: receivedFileMetaRef.current.type });
+            const blob = new Blob(chunksForPreviewRef.current, { type: receivedFileMetaRef.current.type });
             setReceivePreview(URL.createObjectURL(blob));
         }
 
@@ -155,14 +157,14 @@ const App: React.FC = () => {
         writableStreamRef.current = await handle.createWritable();
         setIsMotorReady(true);
         connRef.current.send({ type: 'ready_to_receive' });
-    } catch (err) { console.log("User cancelled save"); }
+    } catch (err) { console.log("Save cancelled by user"); }
   };
 
   const startPumping = () => {
     const file = fileToSendRef.current;
     if (!file || !connRef.current) return;
 
-    const CHUNK_SIZE = 16 * 1024 * 1024; 
+    const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB Chunks
     let offset = 0;
     const reader = new FileReader();
 
@@ -198,79 +200,90 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0a0f1e] text-white relative font-sans overflow-y-auto pb-20">
-      {/* Background Decor */}
+    <div className="min-h-screen bg-[#0a0f1e] text-white relative font-sans overflow-y-auto pb-32">
+      {/* Background Glows */}
       <div className="fixed top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-5%] w-[40%] h-[40%] bg-blue-600/10 rounded-full blur-[120px]"></div>
-        <div className="absolute bottom-[-10%] right-[-5%] w-[40%] h-[40%] bg-purple-600/10 rounded-full blur-[120px]"></div>
+        <div className="absolute top-[-10%] left-[-5%] w-[50%] h-[50%] bg-blue-600/10 rounded-full blur-[120px]"></div>
+        <div className="absolute bottom-[-10%] right-[-5%] w-[50%] h-[50%] bg-indigo-600/10 rounded-full blur-[120px]"></div>
       </div>
 
-      <nav className="relative z-10 border-b border-white/5 backdrop-blur-md bg-[#0a0f1e]/50 sticky top-0">
-        <div className="container mx-auto px-8 py-5 flex justify-between items-center">
-           <span className="text-2xl font-black tracking-tighter">SecureShare</span>
-           <div className="text-[10px] uppercase tracking-widest bg-emerald-500/10 text-emerald-400 px-4 py-1.5 rounded-full border border-emerald-500/20 font-bold">
-             {connectionStatus}
+      <nav className="relative z-10 border-b border-white/5 backdrop-blur-xl bg-[#0a0f1e]/60 sticky top-0 shadow-2xl">
+        <div className="container mx-auto px-6 py-5 flex justify-between items-center">
+           <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center font-black text-xl shadow-lg shadow-blue-600/20">S</div>
+              <span className="text-2xl font-black tracking-tighter">SecureShare</span>
+           </div>
+           <div className="text-[10px] uppercase tracking-widest bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-full border border-emerald-500/20 font-black shadow-inner">
+             ● {connectionStatus}
            </div>
         </div>
       </nav>
 
-      <main className="relative z-10 container mx-auto px-4 py-8 flex flex-col items-center">
+      <main className="relative z-10 container mx-auto px-4 py-12 flex flex-col items-center">
         
-        {/* Tab Switcher */}
-        <div className="bg-white/5 p-1.5 rounded-2xl inline-flex mb-10 border border-white/10 backdrop-blur-xl">
-          <button onClick={() => setActiveTab(Tab.SEND)} className={`px-10 py-3.5 rounded-xl font-bold transition-all duration-300 ${activeTab === Tab.SEND ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}>Send File</button>
-          <button onClick={() => setActiveTab(Tab.RECEIVE)} className={`px-10 py-3.5 rounded-xl font-bold transition-all duration-300 ${activeTab === Tab.RECEIVE ? 'bg-white/10 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}>Receive File</button>
+        {/* Tab Selection */}
+        <div className="bg-white/5 p-1.5 rounded-[1.5rem] inline-flex mb-12 border border-white/10 backdrop-blur-3xl shadow-2xl">
+          <button onClick={() => setActiveTab(Tab.SEND)} className={`px-10 py-4 rounded-2xl font-black transition-all duration-500 ${activeTab === Tab.SEND ? 'bg-blue-600 text-white shadow-xl shadow-blue-600/40 translate-y-[-2px]' : 'text-gray-500 hover:text-white'}`}>SEND MODE</button>
+          <button onClick={() => setActiveTab(Tab.RECEIVE)} className={`px-10 py-4 rounded-2xl font-black transition-all duration-500 ${activeTab === Tab.RECEIVE ? 'bg-white/10 text-white shadow-xl translate-y-[-2px]' : 'text-gray-500 hover:text-white'}`}>RECEIVE MODE</button>
         </div>
 
-        <div className="mb-8 text-center">
-          <p className="text-gray-500 text-[10px] font-black uppercase tracking-[0.3em] mb-4">Your Sharing ID</p>
-          <div className="text-4xl md:text-5xl font-mono font-black text-yellow-400 tracking-[0.25em] bg-yellow-400/5 px-10 py-6 rounded-[2rem] border border-yellow-400/20 shadow-2xl inline-block">
+        {/* Peer ID Card */}
+        <div className="mb-12 text-center group">
+          <p className="text-gray-500 text-[10px] font-black uppercase tracking-[0.4em] mb-4 opacity-50">Local Station ID</p>
+          <div className="text-4xl md:text-6xl font-mono font-black text-yellow-400 tracking-[0.2em] bg-yellow-400/5 px-12 py-8 rounded-[2.5rem] border border-yellow-400/20 shadow-[0_0_50px_rgba(250,204,21,0.1)] inline-block transition-transform group-hover:scale-105 duration-500">
             {myPeerId || '----'}
           </div>
         </div>
 
-        <div className="w-full max-w-2xl bg-[#13192a]/80 backdrop-blur-3xl border border-white/5 rounded-[3rem] p-8 md:p-12 shadow-2xl">
+        {/* Action Container */}
+        <div className="w-full max-w-2xl bg-[#13192a]/80 backdrop-blur-3xl border border-white/5 rounded-[3.5rem] p-8 md:p-14 shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-blue-500/50 to-transparent"></div>
           
           {activeTab === Tab.SEND && (
-            <div className="space-y-8">
-              <div className="group border-2 border-dashed border-white/10 rounded-[2.5rem] p-8 text-center relative hover:border-blue-500/50 transition-all duration-500 bg-white/2 overflow-hidden">
-                <input type="file" onChange={handleFileSelect} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
-                <div className="space-y-4">
+            <div className="space-y-10">
+              <div className="group border-2 border-dashed border-white/10 rounded-[3rem] p-10 text-center relative hover:border-blue-500/50 transition-all duration-500 bg-black/20 overflow-hidden">
+                <input type="file" onChange={handleFileSelect} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" title="Select File" />
+                <div className="space-y-6">
                     {sendPreview ? (
-                        <img src={sendPreview} alt="Preview" className="w-32 h-32 mx-auto object-cover rounded-2xl border-2 border-white/20 shadow-xl" />
+                        <img src={sendPreview} alt="Preview" className="w-40 h-40 mx-auto object-cover rounded-[2rem] border-4 border-white/10 shadow-2xl animate-in zoom-in duration-500" />
                     ) : (
-                        <div className="text-5xl mb-4 opacity-80 group-hover:scale-110 transition-transform duration-500">📄</div>
+                        <div className="text-7xl mb-4 opacity-30 group-hover:opacity-100 group-hover:scale-110 transition-all duration-500">📄</div>
                     )}
-                    <p className="text-xl font-bold tracking-tight truncate px-4">{fileToSend ? fileToSend.name : "Select any file"}</p>
-                    {fileToSend && <p className="text-sm font-medium text-gray-500">{(fileToSend.size / (1024*1024)).toFixed(2)} MB • {fileToSend.type || 'Unknown Format'}</p>}
+                    <div>
+                      <p className="text-2xl font-black tracking-tight truncate px-4">{fileToSend ? fileToSend.name : "Drop or Select File"}</p>
+                      {fileToSend && <p className="text-xs font-black text-blue-400 mt-2 tracking-widest uppercase">{(fileToSend.size / (1024*1024)).toFixed(2)} MB • {fileToSend.type.split('/')[1]?.toUpperCase() || 'FILE'}</p>}
+                    </div>
                 </div>
               </div>
 
-              <div className="flex gap-4 p-2 bg-black/40 rounded-2xl border border-white/5">
+              <div className="flex flex-col md:flex-row gap-4 p-3 bg-black/40 rounded-[2rem] border border-white/5 shadow-inner">
                  <input 
                    type="text" 
-                   placeholder="RECEIVER ID" 
+                   placeholder="ENTER RECEIVER ID" 
                    value={remotePeerId}
                    onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
-                   className="bg-transparent flex-1 px-4 py-3 outline-none text-white font-mono tracking-widest text-lg"
+                   className="bg-transparent flex-1 px-6 py-4 outline-none text-white font-mono tracking-[0.3em] text-xl placeholder:opacity-20"
                  />
                  <button onClick={() => {
                     if(!peerRef.current || !remotePeerId) return;
                     const conn = peerRef.current.connect(remotePeerId.toUpperCase(), { reliable: true });
                     connRef.current = conn;
                     setupConnectionEvents(conn);
-                 }} className="bg-white/5 hover:bg-white/10 px-6 py-3 rounded-xl text-xs font-black transition-all">CONNECT</button>
+                 }} className="bg-white/10 hover:bg-white/20 px-10 py-4 rounded-[1.5rem] text-xs font-black tracking-widest transition-all active:scale-95">CONNECT</button>
               </div>
 
               {transferProgress > 0 && (
-                <div className="space-y-4">
-                    <div className="flex justify-between text-[11px] font-black uppercase tracking-widest px-1">
-                        <span className="text-blue-400">{transferProgress === 100 ? 'Finished' : 'Uploading...'}</span>
-                        <span className="text-white/60">{transferSpeed}</span>
+                <div className="space-y-5 animate-in fade-in slide-in-from-bottom-4">
+                    <div className="flex justify-between text-[11px] font-black uppercase tracking-widest px-2">
+                        <span className="text-blue-400 flex items-center gap-2">
+                          <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span>
+                          {transferProgress === 100 ? 'Transmission Finished' : 'Pumping Data...'}
+                        </span>
+                        <span className="text-white/40">{transferSpeed}</span>
                     </div>
-                    <div className="w-full bg-black/40 rounded-full h-6 p-1.5 border border-white/5">
-                        <div className="bg-gradient-to-r from-blue-600 to-indigo-400 h-full rounded-full transition-all duration-500 relative" style={{ width: `${transferProgress}%` }}>
-                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[9px] font-black text-white">{transferProgress}%</span>
+                    <div className="w-full bg-black/60 rounded-full h-8 p-1.5 border border-white/5 shadow-inner overflow-hidden">
+                        <div className="bg-gradient-to-r from-blue-700 via-blue-500 to-indigo-400 h-full rounded-full transition-all duration-500 relative shadow-lg shadow-blue-500/20" style={{ width: `${transferProgress}%` }}>
+                            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-black text-white">{transferProgress}%</span>
                         </div>
                     </div>
                 </div>
@@ -279,75 +292,82 @@ const App: React.FC = () => {
               <button 
                 onClick={handleSendAction} 
                 disabled={!fileToSend || !connectionStatus.toLowerCase().includes('connected')}
-                className="w-full bg-blue-600 hover:bg-blue-500 py-6 rounded-2xl font-black text-xl shadow-2xl shadow-blue-600/20 disabled:opacity-10 transition-all active:scale-[0.97]"
+                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-white/5 disabled:text-white/20 py-8 rounded-[2rem] font-black text-2xl shadow-2xl shadow-blue-600/30 transition-all active:scale-[0.98] uppercase tracking-tighter"
               >
-                {isWaitingForReceiver ? "WAITING FOR RECEIVER... ⏳" : "SEND INSTANTLY 🚀"}
+                {isWaitingForReceiver ? "Awaiting Confirmation..." : "Transmit Now ⚡"}
               </button>
             </div>
           )}
 
           {activeTab === Tab.RECEIVE && (
-             <div className="space-y-10 text-center py-6">
+             <div className="space-y-12 text-center py-4">
                {!receivedFileMeta ? (
-                 <div className="py-20 flex flex-col items-center space-y-6 opacity-20">
-                    <div className="text-7xl">🛰️</div>
-                    <p className="text-xl font-bold tracking-tight">Ready to receive any format</p>
+                 <div className="py-24 flex flex-col items-center space-y-8 opacity-10">
+                    <div className="text-9xl animate-pulse">📡</div>
+                    <p className="text-2xl font-black tracking-widest uppercase">Waiting for Uplink</p>
                  </div>
                ) : (
-                 <div className="bg-black/20 p-8 md:p-10 rounded-[2.5rem] border border-white/5 animate-in fade-in zoom-in duration-500">
-                   <p className="text-[10px] text-blue-400 font-black tracking-[0.4em] uppercase mb-6">Incoming Transfer</p>
+                 <div className="bg-black/30 p-10 rounded-[3.5rem] border border-white/5 animate-in fade-in zoom-in duration-700 shadow-2xl">
+                   <p className="text-[11px] text-blue-400 font-black tracking-[0.5em] uppercase mb-8">Data Incoming</p>
                    
                    {receivePreview ? (
-                        <img src={receivePreview} alt="Received" className="w-32 h-32 mx-auto object-cover rounded-2xl border-2 border-emerald-500/20 mb-4 shadow-xl shadow-emerald-500/5" />
+                        <img src={receivePreview} alt="Received" className="w-48 h-48 mx-auto object-cover rounded-[2.5rem] border-4 border-emerald-500/20 mb-8 shadow-2xl shadow-emerald-500/10" />
                    ) : (
-                        <div className="text-6xl mb-4">📦</div>
+                        <div className="text-8xl mb-8 filter drop-shadow-2xl">📦</div>
                    )}
 
-                   <h3 className="text-2xl font-black mb-2 truncate px-4">{receivedFileMeta.name}</h3>
-                   <p className="text-sm font-bold text-gray-500 mb-10 tracking-tight">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB • {receivedFileMeta.type || 'File'}</p>
+                   <h3 className="text-3xl font-black mb-4 truncate px-4 tracking-tight">{receivedFileMeta.name}</h3>
                    
-                   <div className="space-y-4 mb-10">
-                       <div className="flex justify-between text-[11px] font-black uppercase tracking-widest px-1">
-                           <span className="text-gray-400">Download Progress</span>
-                           <span className="text-emerald-400">{transferSpeed}</span>
+                   <div className="flex justify-center gap-4 mb-12">
+                      <span className="text-[10px] font-black text-gray-400 bg-white/5 px-5 py-2 rounded-full border border-white/5 uppercase tracking-widest">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB</span>
+                      <span className="text-[10px] font-black text-emerald-400 bg-emerald-400/5 px-5 py-2 rounded-full border border-emerald-400/10 uppercase tracking-widest">{chunkCount} Data Blocks</span>
+                   </div>
+                   
+                   <div className="space-y-5 mb-12">
+                       <div className="flex justify-between text-[11px] font-black uppercase tracking-widest px-2">
+                           <span className="text-gray-500">Download Sync</span>
+                           <span className="text-emerald-400 font-mono">{transferSpeed}</span>
                        </div>
-                       <div className="w-full bg-black/60 rounded-full h-5 overflow-hidden border border-white/5">
-                           <div className="bg-emerald-500 h-full transition-all duration-500 shadow-[0_0_25px_rgba(16,185,129,0.3)]" style={{ width: `${transferProgress}%` }}></div>
+                       <div className="w-full bg-black/60 rounded-full h-7 overflow-hidden border border-white/5 shadow-inner p-1">
+                           <div className="bg-gradient-to-r from-emerald-600 to-teal-400 h-full rounded-full transition-all duration-500 shadow-[0_0_30px_rgba(16,185,129,0.3)]" style={{ width: `${transferProgress}%` }}></div>
                        </div>
                    </div>
 
                    {!isMotorReady && !isTransferComplete && (
                     <button 
                         onClick={prepareMotor}
-                        className="w-full bg-emerald-600 hover:bg-emerald-500 py-6 rounded-2xl font-black text-xl shadow-2xl shadow-emerald-600/20 animate-bounce transition-all active:scale-[0.97]"
+                        className="w-full bg-emerald-600 hover:bg-emerald-500 py-8 rounded-[2rem] font-black text-2xl shadow-2xl shadow-emerald-600/30 animate-bounce transition-all active:scale-[0.98] uppercase"
                     >
-                        CONFIRM & SAVE 💾
+                        Accept & Save 💾
                     </button>
                    )}
 
                    {isTransferComplete && (
-                    <div className="p-6 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-400 font-black tracking-tight text-lg">
-                        ✅ SAVED SUCCESSFULLY
+                    <div className="p-8 bg-emerald-500/10 border-2 border-emerald-500/20 rounded-[2.5rem] text-emerald-400 font-black tracking-widest text-xl shadow-inner animate-in zoom-in">
+                        MISSION ACCOMPLISHED ✅
                     </div>
                    )}
                  </div>
                )}
-               <p className="text-[10px] text-white/20 font-black tracking-[0.3em] uppercase italic">P2P Encrypted Channel</p>
+               <div className="flex items-center justify-center gap-2 opacity-30">
+                  <div className="w-1.5 h-1.5 bg-blue-500 rounded-full"></div>
+                  <p className="text-[9px] text-white font-black tracking-[0.5em] uppercase italic">P2P Military Grade Encryption Active</p>
+               </div>
              </div>
           )}
         </div>
       </main>
 
-      {/* Chat Widget UI */}
-      <div className="fixed bottom-6 right-6 z-50">
+      {/* Modern Chat Widget */}
+      <div className="fixed bottom-8 right-8 z-50">
         {!isChatOpen ? (
-          <button onClick={() => setIsChatOpen(true)} className="w-16 h-16 bg-white text-black rounded-full shadow-2xl flex items-center justify-center text-2xl hover:scale-110 transition-transform active:scale-90 border-4 border-black/10">
-              💬
+          <button onClick={() => setIsChatOpen(true)} className="w-20 h-20 bg-white text-black rounded-[2rem] shadow-[0_20px_50px_rgba(255,255,255,0.1)] flex items-center justify-center text-3xl hover:scale-110 hover:rotate-6 transition-all active:scale-90 border-8 border-black/5 group">
+              <span className="group-hover:animate-bounce">💬</span>
           </button>
         ) : (
-          <div className="w-[320px] md:w-[400px] h-[500px] md:h-[600px] flex flex-col relative animate-in slide-in-from-bottom-12 duration-500">
-            <button onClick={() => setIsChatOpen(false)} className="absolute -top-3 -right-3 w-10 h-10 bg-[#13192a] text-white rounded-full flex items-center justify-center shadow-2xl z-[60] border border-white/10 hover:bg-red-500 transition-colors font-bold text-sm">✕</button>
-            <div className="h-full rounded-[2.5rem] overflow-hidden shadow-2xl border border-white/10 bg-[#0a0f1e]">
+          <div className="w-[350px] md:w-[450px] h-[600px] md:h-[750px] flex flex-col relative animate-in slide-in-from-bottom-24 duration-700 ease-out">
+            <button onClick={() => setIsChatOpen(false)} className="absolute -top-4 -right-4 w-12 h-12 bg-red-500 text-white rounded-2xl flex items-center justify-center shadow-2xl z-[60] border-4 border-[#0a0f1e] hover:bg-red-600 transition-all font-black hover:rotate-90">✕</button>
+            <div className="h-full rounded-[3.5rem] overflow-hidden shadow-[0_0_100px_rgba(0,0,0,0.5)] border border-white/10 bg-[#0a0f1e]">
                 <ChatBot />
             </div>
           </div>
