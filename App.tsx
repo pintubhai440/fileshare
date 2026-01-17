@@ -36,11 +36,6 @@ const App: React.FC = () => {
   const lastUpdateRef = useRef(0);
   const lastBytesRef = useRef(0);
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
-  
-  // 🔥 HYBRID BUFFERING: Accumulate small network chunks into big disk writes
-  const diskBufferRef = useRef<number>(0);
-  // 20MB Flush Threshold (Perfect for Disk speed)
-  const DISK_FLUSH_THRESHOLD = 20 * 1024 * 1024; 
 
   // 🔥 MOTOR - File System Access API
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
@@ -48,10 +43,10 @@ const App: React.FC = () => {
   const [isChatOpen, setIsChatOpen] = useState(false);
 
   useEffect(() => {
+    // Generate a short, readable ID
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     
-    // Config: Using public STUN servers. 
-    // Note: If you have a TURN server, adding it here will drastically boost speed on mobile networks.
+    // PeerJS Configuration - Optimized for Performance
     const peer = new Peer(shortId, { 
         debug: 0, 
         config: {
@@ -77,7 +72,7 @@ const App: React.FC = () => {
     return () => { peer.destroy(); };
   }, []);
 
-  // --- 🚀 HYBRID RECEIVER ENGINE ---
+  // --- 🚀 EXTREME RECEIVER LOGIC (DIRECT 20MB WRITES) ---
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
 
@@ -88,20 +83,24 @@ const App: React.FC = () => {
         const buffer = data instanceof Uint8Array ? data.buffer : data;
         const chunkSize = buffer.byteLength;
         
-        // 1. Collect fast incoming network packets (Memory is fast!)
-        chunksRef.current.push(buffer);
-        bytesReceivedRef.current += chunkSize;
-        diskBufferRef.current += chunkSize;
+        // 🚀 DIRECT WRITE ENGINE
+        // Since chunks are now HUGE (20MB), we don't need to batch them in RAM.
+        // We write them IMMEDIATELY to disk to keep RAM empty.
         
-        // 2. 🔥 INTELLIGENT FLUSHING
-        // Only wake up the Hard Disk when we have 20MB of data waiting.
-        if (writableStreamRef.current && diskBufferRef.current >= DISK_FLUSH_THRESHOLD) {
-            await flushToDisk();
-        }
-        
-        // Fallback for non-Motor users (Keep in RAM)
-        if (!writableStreamRef.current) {
-           // Warning: Can crash on 15GB files if Motor is not used.
+        if (writableStreamRef.current) {
+          try {
+             // Direct stream to disk
+             await writableStreamRef.current.write(buffer);
+             bytesReceivedRef.current += chunkSize;
+          } catch (err) {
+             console.error("Critical Write Error:", err);
+             conn.close(); 
+             setConnectionStatus("Disk Write Error - Stopped");
+          }
+        } else {
+          // Fallback for non-motor mode (still stores in RAM, risky for 15GB files)
+          chunksRef.current.push(buffer);
+          bytesReceivedRef.current += chunkSize;
         }
         
         updateProgress();
@@ -110,11 +109,10 @@ const App: React.FC = () => {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        // Full Reset
+        // Reset Logic
         chunksRef.current = []; 
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
-        diskBufferRef.current = 0;
         lastUpdateRef.current = Date.now();
         
         setIsTransferComplete(false);
@@ -123,17 +121,13 @@ const App: React.FC = () => {
         setTransferProgress(0);
         setTransferSpeed('Starting...');
         
+        // Close old stream if exists
         if (writableStreamRef.current) {
           try { await writableStreamRef.current.close(); } catch(e){}
           writableStreamRef.current = null;
         }
       } 
       else if (data.type === 'end') {
-        // Write the final remaining piece
-        if (writableStreamRef.current && chunksRef.current.length > 0) {
-            await flushToDisk();
-        }
-
         if (writableStreamRef.current) {
           try {
             await writableStreamRef.current.close();
@@ -157,26 +151,7 @@ const App: React.FC = () => {
     });
   };
 
-  // Helper: Dumps RAM buffer to Disk efficiently
-  const flushToDisk = async () => {
-      if (!writableStreamRef.current || chunksRef.current.length === 0) return;
-
-      try {
-          // Combine all small packets into one solid 20MB block
-          const blob = new Blob(chunksRef.current);
-          
-          // Write to disk
-          await writableStreamRef.current.write(blob);
-          
-          // Clear RAM immediately
-          chunksRef.current = [];
-          diskBufferRef.current = 0;
-      } catch (err) {
-          console.error("Disk Write Error", err);
-          setConnectionStatus("Disk Write Error");
-      }
-  };
-
+  // 🔥 MOTOR SETUP - Get Disk Access Early
   const prepareMotor = async () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
     const meta = receivedFileMetaRef.current;
@@ -190,9 +165,9 @@ const App: React.FC = () => {
         });
         writableStreamRef.current = await handle.createWritable();
         setIsMotorReady(true);
-        setTransferSpeed('Motor Ready (Hybrid Mode) ⚡');
+        setTransferSpeed('Motor Ready (Direct Mode) ⚡');
         
-        // Tell sender to start
+        // Signal Sender to start pumping
         connRef.current.send({ type: 'ready_to_receive' });
       } catch (err) {
         setTransferSpeed('Save cancelled');
@@ -208,8 +183,8 @@ const App: React.FC = () => {
     if (!receivedFileMetaRef.current) return;
     const now = Date.now();
     
-    // Throttle UI to save CPU (Updates every 300ms)
-    if (now - lastUpdateRef.current < 300) return;
+    // Throttle UI Updates (Prevent Main Thread Blocking)
+    if (now - lastUpdateRef.current < 200) return;
 
     const total = receivedFileMetaRef.current.size;
     const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
@@ -227,6 +202,7 @@ const App: React.FC = () => {
     lastBytesRef.current = bytesReceivedRef.current;
   };
 
+  // --- SENDER LOGIC (EXTREME CHUNKS) ---
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -262,14 +238,13 @@ const App: React.FC = () => {
     });
   };
 
-  // 🚀 HYBRID PUMPING ENGINE
+  // 🚀 THE 20MB PUMP ENGINE
   const startPumping = (conn: DataConnection) => {
     if (!fileToSend) return;
 
-    // 🔥 BACK TO 64KB! 
-    // 20MB chunks were choking the network. 64KB flows like water.
-    // The RECEIVER will batch these into 20MB for the disk.
-    const CHUNK_SIZE = 64 * 1024; 
+    // 🔥 BIG CHUNK SIZE: 20 MB
+    // This reduces overhead by 300x compared to 64KB chunks.
+    const CHUNK_SIZE = 5 * 1024 * 1024; 
     
     const fileReader = new FileReader();
     let offset = 0;
@@ -286,6 +261,7 @@ const App: React.FC = () => {
         offset += buffer.byteLength;
 
         const now = Date.now();
+        // Update UI only occasionally to save CPU for transfer
         if (now - lastUpdateRef.current > 300) {
              const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
              const bytesDiff = offset - lastBytesRef.current;
@@ -307,15 +283,18 @@ const App: React.FC = () => {
            setTransferSpeed('Sent');
         }
       } catch (err) {
+        console.warn("Send buffer full, retrying...");
         setTimeout(readNextChunk, 50);
       }
     };
 
     const readNextChunk = () => {
-      // 🔥 TIGHTER BUFFER CONTROL
-      // Keep buffer low (1MB) so packets don't get stale in memory.
-      if (conn.dataChannel.bufferedAmount > 1 * 1024 * 1024) {
-          setTimeout(readNextChunk, 5); // Fast retry
+      // 🔥 ADJUSTED BACKPRESSURE
+      // Since we send 20MB chunks, we need a higher buffer limit (e.g., 25MB)
+      // otherwise it will pause after every single chunk.
+      if (conn.dataChannel.bufferedAmount > 25 * 1024 * 1024) {
+          // Wait briefly for buffer to clear
+          setTimeout(readNextChunk, 20); 
           return;
       }
       const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
@@ -325,6 +304,7 @@ const App: React.FC = () => {
     readNextChunk();
   };
 
+  // Fallback Save (Standard Download)
   const handleSaveFile = async () => {
       const meta = receivedFileMetaRef.current || receivedFileMeta;
       if (!meta) return;
