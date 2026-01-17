@@ -28,7 +28,7 @@ const App: React.FC = () => {
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
-  const [isFileSaved, setIsFileSaved] = useState(false); // To track if file is safely on disk
+  const [isFileSaved, setIsFileSaved] = useState(false);
   
   // High Performance Refs
   const chunksRef = useRef<ArrayBuffer[]>([]);
@@ -76,7 +76,6 @@ const App: React.FC = () => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
     
     conn.on('data', async (data: any) => {
-      // Check for BOTH ArrayBuffer and Uint8Array
       const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
       
       if (isBinary) {
@@ -104,7 +103,7 @@ const App: React.FC = () => {
         lastUpdateRef.current = Date.now();
         setIsTransferComplete(false);
         setIsMotorReady(false);
-        setIsFileSaved(false); // Reset saved status
+        setIsFileSaved(false);
         setTransferProgress(0);
         setTransferSpeed('Starting...');
         
@@ -118,7 +117,7 @@ const App: React.FC = () => {
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
-          setIsFileSaved(true); // Mark as saved so button hides
+          setIsFileSaved(true);
         }
         setTransferProgress(100);
         setTransferSpeed('Completed');
@@ -140,7 +139,6 @@ const App: React.FC = () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
     const meta = receivedFileMetaRef.current;
     
-    // Check if browser supports File System Access API
     if ('showSaveFilePicker' in window) {
       try {
         const handle = await (window as any).showSaveFilePicker({
@@ -189,7 +187,7 @@ const App: React.FC = () => {
     lastBytesRef.current = bytesReceivedRef.current;
   };
 
-  // Sender Logic (5MB Chunks)
+  // Sender Logic
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setFileToSend(e.target.files[0]);
@@ -237,59 +235,85 @@ const App: React.FC = () => {
     });
   };
 
+  // 🔥 AGGRESSIVE SPEED ENGINE (64KB Chunks + High Pressure Loop)
   const startPumping = (conn: DataConnection) => {
     if (!fileToSend) return;
-    
-    const CHUNK_SIZE = 10 * 1024 * 1024; // 5MB Chunks
+
+    // 1. Chunk Size: 64KB (WebRTC ka favourite size)
+    // Chote packets packet-loss hone par jaldi recover hote hain
+    const CHUNK_SIZE = 64 * 1024; 
+
+    // 2. Buffer Limit: 16MB (Pipe ko thusa-thusa ke bhare rakhna hai)
+    // Agar ye kam hua (e.g. 1MB), to speed 0.2MB/s ho jayegi.
+    const MAX_BUFFERED_AMOUNT = 16 * 1024 * 1024;
+
     const fileReader = new FileReader();
     let offset = 0;
-    
+
     lastUpdateRef.current = Date.now();
     lastBytesRef.current = 0;
-    
+
     fileReader.onload = (e) => {
       if (!e.target?.result) return;
       const buffer = e.target.result as ArrayBuffer;
-      
+
       try {
+        // Send data immediately
         conn.send(buffer);
         offset += buffer.byteLength;
-        
+
+        // UI Update Logic (Har 300ms pe update, taaki CPU free rahe)
         const now = Date.now();
         if (now - lastUpdateRef.current > 300) {
-          const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
-          const bytesDiff = offset - lastBytesRef.current;
-          const timeDiff = (now - lastUpdateRef.current) / 1000;
-          const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-          
-          setTransferProgress(progress);
-          setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-          lastUpdateRef.current = now;
-          lastBytesRef.current = offset;
+             const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
+             const bytesDiff = offset - lastBytesRef.current;
+             const timeDiff = (now - lastUpdateRef.current) / 1000;
+             if (timeDiff > 0) {
+                 const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+                 setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+             }
+             setTransferProgress(progress);
+             lastUpdateRef.current = now;
+             lastBytesRef.current = offset;
         }
-        
+
         if (offset < fileToSend.size) {
-          readNextChunk();
+           // 🔥 CRITICAL LOOP LOGIC 🔥
+           // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
+           if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
+               readNextChunk(); 
+           } else {
+               // Agar buffer full hai, to wait karo
+               waitForDrain();
+           }
         } else {
-          conn.send({ type: 'end' });
-          setTransferProgress(100);
-          setTransferSpeed('Sent');
+           conn.send({ type: 'end' });
+           setTransferProgress(100);
+           setTransferSpeed('Sent');
         }
       } catch (err) {
+        console.error("Error sending, retrying...", err);
         setTimeout(readNextChunk, 100);
       }
     };
-    
+
     const readNextChunk = () => {
-      if (conn.dataChannel.bufferedAmount > 10 * 1024 * 1024) {
-        setTimeout(readNextChunk, 50);
-        return;
-      }
-      
       const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
       fileReader.readAsArrayBuffer(slice);
     };
-    
+
+    // Ye function tab tak check karega jab tak buffer thoda khali nahi hota
+    const waitForDrain = () => {
+        if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT / 2) {
+            // Buffer aadha khali ho gaya, wapas attack karo!
+            readNextChunk();
+        } else {
+            // Abhi bhi full hai, 5ms baad check karo
+            setTimeout(waitForDrain, 5);
+        }
+    };
+
+    // Engine Start
     readNextChunk();
   };
 
@@ -309,7 +333,6 @@ const App: React.FC = () => {
     setTransferSpeed('Saving to Disk...');
     
     try {
-      // If we already used motor, file is already saved
       if (writableStreamRef.current || isFileSaved) {
         setTransferSpeed('Already Saved via Motor ⚡');
         return;
@@ -321,7 +344,6 @@ const App: React.FC = () => {
       const a = document.createElement('a');
       a.href = url;
       
-      // Add extension if missing
       if (!meta.name.includes('.')) {
         const ext = meta.type.split('/')[1] || 'bin';
         a.download = `${meta.name}.${ext}`;
