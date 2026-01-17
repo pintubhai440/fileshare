@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Tab } from './types';
 import { ChatBot } from './components/ChatBot';
 import Peer, { DataConnection } from 'peerjs';
@@ -9,14 +9,11 @@ interface FileMeta {
   type: string;
 }
 
-interface TransferLog {
-  id: string;
-  timestamp: Date;
-  type: 'send' | 'receive';
-  fileName: string;
-  fileSize: number;
-  status: 'success' | 'failed' | 'cancelled';
-  speed: string;
+interface TransferStats {
+  startTime: number;
+  totalBytes: number;
+  peakSpeed: number;
+  averageSpeed: number;
 }
 
 const App: React.FC = () => {
@@ -33,7 +30,6 @@ const App: React.FC = () => {
   const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [transferProgress, setTransferProgress] = useState(0);
   const [transferSpeed, setTransferSpeed] = useState<string>('0.0 MB/s');
-  const [transferLogs, setTransferLogs] = useState<TransferLog[]>([]);
   
   // Receive State
   const [remotePeerId, setRemotePeerId] = useState('');
@@ -49,15 +45,17 @@ const App: React.FC = () => {
   const lastBytesRef = useRef(0);
   const receivedFileMetaRef = useRef<FileMeta | null>(null);
   
+  // Transfer Statistics
+  const transferStatsRef = useRef<TransferStats>({
+    startTime: 0,
+    totalBytes: 0,
+    peakSpeed: 0,
+    averageSpeed: 0
+  });
+  
   // File System Access API
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
-
-  // Transfer Statistics
-  const totalTransferredRef = useRef<number>(0);
-  const [totalFilesTransferred, setTotalFilesTransferred] = useState<number>(0);
-  const [averageSpeed, setAverageSpeed] = useState<number>(0);
-  const speedSamplesRef = useRef<number[]>([]);
 
   // Initialize PeerJS
   useEffect(() => {
@@ -75,74 +73,55 @@ const App: React.FC = () => {
     peer.on('open', (id) => {
       setMyPeerId(id);
       setConnectionStatus('Ready to Connect');
-      addTransferLog('system', 'Peer initialized', 'success');
     });
 
     peer.on('connection', (conn) => {
       connRef.current = conn;
       setConnectionStatus(`Connected to ${conn.peer}`);
-      addTransferLog('receive', `Connection from ${conn.peer}`, 'success');
       setupReceiverEvents(conn);
     });
 
     peer.on('error', (err) => {
-      console.error('PeerJS Error:', err);
-      addTransferLog('system', `Error: ${err.type}`, 'failed');
+      console.error('PeerJS error:', err);
+      setConnectionStatus(`Error: ${err.type}`);
     });
 
     peerRef.current = peer;
 
     return () => {
-      if (peerRef.current) {
-        peerRef.current.destroy();
-      }
+      peer.destroy();
     };
   }, []);
 
-  // Add transfer log
-  const addTransferLog = (
-    type: 'send' | 'receive' | 'system', 
-    fileName: string, 
-    status: 'success' | 'failed' | 'cancelled',
-    fileSize?: number,
-    speed?: string
-  ) => {
-    const log: TransferLog = {
-      id: Date.now().toString(),
-      timestamp: new Date(),
-      type,
-      fileName,
-      fileSize: fileSize || 0,
-      status,
-      speed: speed || '0.0 MB/s'
-    };
-    
-    setTransferLogs(prev => [log, ...prev.slice(0, 49)]); // Keep last 50 logs
-  };
+  // BEST SETTINGS FOR MAX SPEED
+  const CHUNK_SIZE = 64 * 1024; // 64KB रखें
+  const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
+  const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
+  const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
 
-  // Enhanced Receiver Logic
+  // Receiver Logic (FIXED FOR CORRUPTION)
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => {
       setConnectionStatus(`Connected securely to ${conn.peer}`);
-      addTransferLog('receive', `Secure connection established`, 'success');
+      // Set binary type for faster transfer
+      if (conn.dataChannel) {
+        conn.dataChannel.binaryType = 'arraybuffer';
+      }
     });
     
     conn.on('data', async (data: any) => {
       const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
       
       if (isBinary) {
+        // FIX: Critical Data Handling
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         
         // Motor Mode: Stream directly to disk
         if (writableStreamRef.current) {
-          try {
-            await writableStreamRef.current.write(chunk);
-            bytesReceivedRef.current += chunk.byteLength;
-          } catch (error) {
-            console.error('Stream write error:', error);
-            chunksRef.current.push(chunk);
-          }
+          await writableStreamRef.current.write(chunk);
+          bytesReceivedRef.current += chunk.byteLength;
         } else {
+          // Fallback: Store in memory (Correctly)
           chunksRef.current.push(chunk);
           bytesReceivedRef.current += chunk.byteLength;
         }
@@ -152,7 +131,7 @@ const App: React.FC = () => {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        // Reset for new file
+        // Reset everything for new file
         chunksRef.current = [];
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
@@ -163,12 +142,19 @@ const App: React.FC = () => {
         setTransferProgress(0);
         setTransferSpeed('Starting...');
         
+        // Initialize transfer stats
+        transferStatsRef.current = {
+          startTime: Date.now(),
+          totalBytes: 0,
+          peakSpeed: 0,
+          averageSpeed: 0
+        };
+        
+        // Close any existing stream
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
         }
-        
-        addTransferLog('receive', `Receiving: ${data.meta.name}`, 'success', data.meta.size);
       } 
       else if (data.type === 'end') {
         if (writableStreamRef.current) {
@@ -176,45 +162,37 @@ const App: React.FC = () => {
           writableStreamRef.current = null;
           setIsFileSaved(true);
         }
-        
         setTransferProgress(100);
         setTransferSpeed('Completed');
         setIsTransferComplete(true);
         
-        const meta = receivedFileMetaRef.current;
-        if (meta) {
-          totalTransferredRef.current += meta.size;
-          setTotalFilesTransferred(prev => prev + 1);
-          addTransferLog('receive', `Completed: ${meta.name}`, 'success', meta.size, transferSpeed);
-        }
+        // Calculate final stats
+        const totalTime = (Date.now() - transferStatsRef.current.startTime) / 1000;
+        const avgSpeed = (bytesReceivedRef.current / totalTime) / (1024 * 1024);
+        transferStatsRef.current.averageSpeed = avgSpeed;
       } 
       else if (data.type === 'ready_to_receive') {
-        // Receiver is ready
+        // Sender is ready
       }
-      else if (data.type === 'transfer_cancelled') {
-        addTransferLog('receive', 'Transfer cancelled by sender', 'cancelled');
-        resetReceiverState();
+      else if (data.type === 'file_complete') {
+        // Individual file complete in queue
+        console.log(`File ${data.index + 1} completed`);
       }
     });
     
     conn.on('close', () => {
       setConnectionStatus('Connection Closed');
       setTransferProgress(0);
-      addTransferLog('system', 'Connection closed', 'cancelled');
-    });
-    
-    conn.on('error', (err) => {
-      console.error('Connection error:', err);
-      addTransferLog('system', `Connection error: ${err.message}`, 'failed');
+      setTransferSpeed('0.0 MB/s');
     });
   };
 
-  // Enhanced Motor Mode
+  // Motor - Prepare file system for streaming
   const prepareMotor = async () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
-    
     const meta = receivedFileMetaRef.current;
     
+    // Check browser support safely
     if ('showSaveFilePicker' in window) {
       try {
         const handle = await (window as any).showSaveFilePicker({
@@ -229,318 +207,229 @@ const App: React.FC = () => {
         setIsMotorReady(true);
         setTransferSpeed('Motor Ready ⚡');
         
+        // Notify sender we're ready
         connRef.current.send({ type: 'ready_to_receive' });
-        addTransferLog('receive', 'Motor mode activated', 'success');
       } catch (err) {
-        console.log("File save cancelled");
+        console.log("User cancelled file save dialog");
+        // Don't error out, just let them use fallback
+        setTransferSpeed('Save cancelled (Using Fallback)');
+        // Still continue with fallback
         setIsMotorReady(true);
         connRef.current.send({ type: 'ready_to_receive' });
-        setTransferSpeed('Ready (Fallback Mode)');
       }
     } else {
-      setIsMotorReady(true);
+      // Fallback mode for Firefox/Mobile
+      setIsMotorReady(true); // Auto-ready without popup
       connRef.current.send({ type: 'ready_to_receive' });
-      setTransferSpeed('Ready (Fallback Mode)');
+      setTransferSpeed('Ready (Auto-Save Mode)');
     }
   };
 
-  // Enhanced progress calculation
+  // Progress update function
   const updateProgress = () => {
     if (!receivedFileMetaRef.current) return;
     
     const now = Date.now();
-    if (now - lastUpdateRef.current < 200) return;
+    if (now - lastUpdateRef.current < 300) return;
     
     const total = receivedFileMetaRef.current.size;
-    const bytesReceived = bytesReceivedRef.current;
-    const percent = Math.min(100, Math.round((bytesReceived / total) * 100));
-    
-    const bytesDiff = bytesReceived - lastBytesRef.current;
+    const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
+    const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
     const timeDiff = (now - lastUpdateRef.current) / 1000;
     
     if (timeDiff > 0) {
       const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-      const speedStr = `${speedMBps.toFixed(1)} MB/s`;
+      setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
       
-      // Update speed samples for average calculation
-      speedSamplesRef.current.push(speedMBps);
-      if (speedSamplesRef.current.length > 10) {
-        speedSamplesRef.current.shift();
+      // Update peak speed
+      if (speedMBps > transferStatsRef.current.peakSpeed) {
+        transferStatsRef.current.peakSpeed = speedMBps;
       }
       
-      const avgSpeed = speedSamplesRef.current.reduce((a, b) => a + b, 0) / speedSamplesRef.current.length;
-      setAverageSpeed(avgSpeed);
-      
-      setTransferSpeed(speedStr);
+      // Update total bytes
+      transferStatsRef.current.totalBytes = bytesReceivedRef.current;
     }
     
     setTransferProgress(percent);
+    
     lastUpdateRef.current = now;
-    lastBytesRef.current = bytesReceived;
+    lastBytesRef.current = bytesReceivedRef.current;
   };
 
-  // File selection
+  // Sender Logic
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const filesArray = Array.from(e.target.files);
-      
-      // Sort by size (largest first for better throughput estimation)
-      filesArray.sort((a, b) => b.size - a.size);
-      
-      setFilesQueue(filesArray);
+      setFilesQueue(Array.from(e.target.files));
       setCurrentFileIndex(0);
       setTransferProgress(0);
       setTransferSpeed('0.0 MB/s');
-      
-      // Log file selection
-      filesArray.forEach((file, index) => {
-        addTransferLog('send', `Queued: ${file.name}`, 'success', file.size);
-      });
     }
   };
 
-  // Connection management
   const connectToPeer = () => {
-    if (!remotePeerId.trim() || !peerRef.current) return;
+    if (!remotePeerId || !peerRef.current) return;
     
     setConnectionStatus('Connecting...');
-    const peerId = remotePeerId.toUpperCase();
-    
-    try {
-      const conn = peerRef.current.connect(peerId, {
-        reliable: true,
-        serialization: 'binary'
-      });
-      
-      connRef.current = conn;
-      setupReceiverEvents(conn);
-      
-      conn.on('open', () => {
-        setConnectionStatus(`Connected to ${peerId}`);
-        addTransferLog('send', `Connected to ${peerId}`, 'success');
-      });
-      
-      conn.on('error', (err) => {
-        setConnectionStatus(`Connection failed: ${err.message}`);
-        addTransferLog('send', `Failed to connect to ${peerId}`, 'failed');
-      });
-    } catch (error) {
-      setConnectionStatus('Connection error');
-      addTransferLog('send', 'Connection error', 'failed');
-    }
+    const conn = peerRef.current.connect(remotePeerId.toUpperCase(), {
+      reliable: true
+    });
+    connRef.current = conn;
+    setupReceiverEvents(conn);
   };
 
-  // Send all files with enhanced error handling
-  const sendAllFiles = async () => {
+  // Send all files in queue
+  const sendAllFiles = () => {
     if (!connRef.current || filesQueue.length === 0) {
       alert("No connection or files!");
       return;
     }
     
-    try {
-      await processFileQueue(0);
-    } catch (error) {
-      console.error('Transfer error:', error);
-      addTransferLog('send', 'Transfer failed', 'failed');
-      alert('Transfer failed. Please try again.');
-    }
+    // Start with the first file
+    processFileQueue(0);
   };
 
-  // Enhanced file queue processing
-  const processFileQueue = async (index: number): Promise<void> => {
+  const processFileQueue = (index: number) => {
     if (index >= filesQueue.length) {
       setTransferSpeed('All Files Sent Successfully! 🎉');
-      
-      // Calculate total transfer stats
-      const totalSize = filesQueue.reduce((sum, file) => sum + file.size, 0);
-      totalTransferredRef.current += totalSize;
-      setTotalFilesTransferred(prev => prev + filesQueue.length);
-      
-      addTransferLog('send', `Completed ${filesQueue.length} files`, 'success', totalSize);
       return;
     }
 
     const file = filesQueue[index];
     setCurrentFileIndex(index);
-    
-    if (!connRef.current) {
-      throw new Error('Connection lost');
-    }
+    const conn = connRef.current!;
 
-    const conn = connRef.current;
-
-    try {
-      // Send metadata
-      conn.send({
-        type: 'meta',
-        meta: {
-          name: file.name,
-          size: file.size,
-          type: file.type
-        }
-      });
-
-      setTransferProgress(1);
-      setTransferSpeed(`Preparing: ${file.name}...`);
-      addTransferLog('send', `Starting: ${file.name}`, 'success', file.size);
-
-      // Wait for receiver ready with timeout
-      const readyPromise = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('Receiver timeout'));
-        }, 30000);
-
-        const onReady = (data: any) => {
-          if (data.type === 'ready_to_receive') {
-            clearTimeout(timeout);
-            conn.off('data', onReady);
-            resolve();
-          }
-        };
-
-        conn.on('data', onReady);
-      });
-
-      await readyPromise;
-
-      // Start transfer
-      await startPumping(conn, file, (progress, speed) => {
-        setTransferProgress(progress);
-        setTransferSpeed(speed);
-      });
-
-      // File completed successfully
-      addTransferLog('send', `Completed: ${file.name}`, 'success', file.size, transferSpeed);
-
-      // Move to next file
-      setTimeout(() => {
-        processFileQueue(index + 1);
-      }, 300);
-    } catch (error) {
-      addTransferLog('send', `Failed: ${file.name}`, 'failed', file.size);
-      throw error;
-    }
-  };
-
-  // ULTRA-OPTIMIZED TRANSFER ENGINE
-  const startPumping = (
-    conn: DataConnection,
-    file: File,
-    onProgress: (progress: number, speed: string) => void
-  ): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      const CHUNK_SIZE = 256 * 1024; // 256KB chunks for better performance
-      const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024;
-      const DRAIN_THRESHOLD = 8 * 1024 * 1024;
-      const POLLING_INTERVAL = 1;
-      const SPEED_UPDATE_INTERVAL = 100; // Update speed every 100ms
-
-      const fileReader = new FileReader();
-      let offset = 0;
-      let isCancelled = false;
-      let startTime = Date.now();
-      let lastSpeedUpdate = startTime;
-      let bytesSent = 0;
-      let lastBytes = 0;
-
-      const calculateSpeed = (): string => {
-        const now = Date.now();
-        const timeDiff = (now - lastSpeedUpdate) / 1000;
-        
-        if (timeDiff > 0) {
-          const bytesDiff = bytesSent - lastBytes;
-          const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-          lastSpeedUpdate = now;
-          lastBytes = bytesSent;
-          return `${speedMBps.toFixed(1)} MB/s`;
-        }
-        return '0.0 MB/s';
-      };
-
-      const waitForDrain = () => {
-        if (isCancelled) return;
-        
-        if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
-          readNextChunk();
-        } else {
-          setTimeout(waitForDrain, POLLING_INTERVAL);
-        }
-      };
-
-      fileReader.onload = (e) => {
-        if (isCancelled) return;
-        
-        if (!e.target?.result) {
-          reject(new Error('File read error'));
-          return;
-        }
-
-        const buffer = e.target.result as ArrayBuffer;
-        
-        try {
-          // Send chunk
-          conn.send(buffer);
-          offset += buffer.byteLength;
-          bytesSent += buffer.byteLength;
-          
-          // Calculate progress
-          const progress = Math.min(100, Math.round((offset / file.size) * 100));
-          
-          // Update progress at regular intervals
-          const now = Date.now();
-          if (now - lastSpeedUpdate >= SPEED_UPDATE_INTERVAL || progress === 100) {
-            const speed = calculateSpeed();
-            onProgress(progress, speed);
-          }
-
-          if (offset < file.size) {
-            // Check buffer and continue
-            if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-              readNextChunk();
-            } else {
-              waitForDrain();
-            }
-          } else {
-            // Transfer complete
-            conn.send({ type: 'end' });
-            onProgress(100, 'Complete');
-            resolve();
-          }
-        } catch (err) {
-          if (!isCancelled) {
-            setTimeout(() => readNextChunk(), 50);
-          } else {
-            reject(err);
-          }
-        }
-      };
-
-      fileReader.onerror = () => {
-        if (!isCancelled) {
-          reject(new Error('File read error'));
-        }
-      };
-
-      const readNextChunk = () => {
-        if (isCancelled || offset >= file.size) return;
-        
-        const nextChunkSize = Math.min(CHUNK_SIZE, file.size - offset);
-        const slice = file.slice(offset, offset + nextChunkSize);
-        fileReader.readAsArrayBuffer(slice);
-      };
-
-      // Start transfer
-      readNextChunk();
-
-      // Cleanup
-      return () => {
-        isCancelled = true;
-        fileReader.abort();
-      };
+    // 1. Send file metadata
+    conn.send({
+      type: 'meta',
+      meta: {
+        name: file.name,
+        size: file.size,
+        type: file.type
+      }
     });
+
+    setTransferProgress(1);
+    setTransferSpeed(`Waiting for receiver to accept: ${file.name}...`);
+
+    // 2. Wait for 'ready_to_receive' for THIS file
+    const onReady = (data: any) => {
+      if (data.type === 'ready_to_receive') {
+        conn.off('data', onReady);
+        
+        // 3. Start Pumping this file
+        startPumping(conn, file, () => {
+          // 4. On Complete, trigger next file
+          setTimeout(() => {
+            processFileQueue(index + 1);
+          }, 500);
+        });
+      }
+    };
+
+    conn.on('data', onReady);
   };
 
-  // Enhanced Save Function
+  // 🔥 AGGRESSIVE SPEED ENGINE with BEST SETTINGS
+  const startPumping = (conn: DataConnection, file: File, onComplete: () => void) => {
+    // BEST SETTINGS FOR MAX SPEED:
+    const CHUNK_SIZE = 64 * 1024; // 64KB रखें
+    const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
+    const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
+    const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
+
+    const fileReader = new FileReader();
+    let offset = 0;
+    let totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    let chunksSent = 0;
+
+    lastUpdateRef.current = Date.now();
+    lastBytesRef.current = 0;
+
+    // Initialize sender stats
+    const senderStats = {
+      startTime: Date.now(),
+      totalBytes: 0,
+      peakSpeed: 0,
+      averageSpeed: 0
+    };
+
+    const waitForDrain = () => {
+      if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
+        // Buffer 4MB तक खाली हो गया, वापस attack करो!
+        readNextChunk();
+      } else {
+        // अभी भी full है, 2ms बाद check करो
+        setTimeout(waitForDrain, POLLING_INTERVAL);
+      }
+    };
+
+    fileReader.onload = (e) => {
+      if (!e.target?.result) return;
+      const buffer = e.target.result as ArrayBuffer;
+      chunksSent++;
+
+      try {
+        conn.send(buffer);
+        offset += buffer.byteLength;
+        senderStats.totalBytes = offset;
+
+        // UI Update Logic (Har 300ms pe update, taaki CPU free rahe)
+        const now = Date.now();
+        if (now - lastUpdateRef.current > 300) {
+          const progress = Math.min(100, Math.round((offset / file.size) * 100));
+          const bytesDiff = offset - lastBytesRef.current;
+          const timeDiff = (now - lastUpdateRef.current) / 1000;
+          if (timeDiff > 0) {
+            const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
+            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+            
+            // Update peak speed
+            if (speedMBps > senderStats.peakSpeed) {
+              senderStats.peakSpeed = speedMBps;
+            }
+          }
+          setTransferProgress(progress);
+          lastUpdateRef.current = now;
+          lastBytesRef.current = offset;
+        }
+
+        if (offset < file.size) {
+          // 🔥 CRITICAL LOOP LOGIC 🔥
+          // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
+          if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
+            readNextChunk();
+          } else {
+            // Agar buffer full hai, to wait karo
+            waitForDrain();
+          }
+        } else {
+          conn.send({ type: 'end' });
+          setTransferProgress(100);
+          setTransferSpeed('Sent');
+          
+          // Calculate final average speed
+          const totalTime = (Date.now() - senderStats.startTime) / 1000;
+          senderStats.averageSpeed = (file.size / totalTime) / (1024 * 1024);
+          
+          console.log(`File sent: ${file.name}, Avg Speed: ${senderStats.averageSpeed.toFixed(1)} MB/s, Peak: ${senderStats.peakSpeed.toFixed(1)} MB/s`);
+          
+          onComplete();
+        }
+      } catch (err) {
+        console.error("Error sending, retrying...", err);
+        setTimeout(readNextChunk, 100);
+      }
+    };
+
+    const readNextChunk = () => {
+      const slice = file.slice(offset, offset + CHUNK_SIZE);
+      fileReader.readAsArrayBuffer(slice);
+    };
+
+    readNextChunk();
+  };
+
+  // Save Function (Fallback for non-motor mode)
   const handleSaveFile = async () => {
     const meta = receivedFileMetaRef.current || receivedFileMeta;
     if (!meta) {
@@ -561,64 +450,72 @@ const App: React.FC = () => {
         return;
       }
       
+      // Safe Blob Creation
       const blob = new Blob(chunksRef.current, { type: meta.type });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = meta.name;
+      
+      if (!meta.name.includes('.')) {
+        const ext = meta.type.split('/')[1] || 'bin';
+        a.download = `${meta.name}.${ext}`;
+      } else {
+        a.download = meta.name;
+      }
       
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setTransferSpeed('Saved Successfully');
+      setTransferSpeed('Saved (Standard)');
       setIsFileSaved(true);
-      addTransferLog('receive', `Saved: ${meta.name}`, 'success', meta.size);
     } catch (err) {
       console.error("Save failed:", err);
       setTransferSpeed('Save Failed');
-      addTransferLog('receive', `Save failed: ${meta.name}`, 'failed', meta.size);
     }
   };
 
-  // Reset receiver state
-  const resetReceiverState = () => {
-    chunksRef.current = [];
-    bytesReceivedRef.current = 0;
-    lastBytesRef.current = 0;
-    lastUpdateRef.current = 0;
-    receivedFileMetaRef.current = null;
-    setReceivedFileMeta(null);
-    setIsTransferComplete(false);
-    setIsMotorReady(false);
-    setIsFileSaved(false);
+  // Drag and drop support
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      setFilesQueue(Array.from(e.dataTransfer.files));
+      setCurrentFileIndex(0);
+      setTransferProgress(0);
+      setTransferSpeed('0.0 MB/s');
+    }
+  };
+
+  // Clear files queue
+  const clearFilesQueue = () => {
+    setFilesQueue([]);
+    setCurrentFileIndex(0);
     setTransferProgress(0);
     setTransferSpeed('0.0 MB/s');
   };
 
-  // Disconnect from peer
-  const disconnectPeer = () => {
-    if (connRef.current) {
-      connRef.current.close();
-      connRef.current = null;
+  // Remove single file from queue
+  const removeFileFromQueue = (index: number) => {
+    const newQueue = [...filesQueue];
+    newQueue.splice(index, 1);
+    setFilesQueue(newQueue);
+    if (currentFileIndex >= index && currentFileIndex > 0) {
+      setCurrentFileIndex(currentFileIndex - 1);
     }
-    setConnectionStatus('Disconnected');
-    setRemotePeerId('');
-    addTransferLog('system', 'Disconnected', 'cancelled');
   };
 
-  // Clear transfer logs
-  const clearLogs = () => {
-    setTransferLogs([]);
-  };
-
-  // Format file size
-  const formatFileSize = (bytes: number): string => {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  // Copy Peer ID to clipboard
+  const copyPeerId = () => {
+    navigator.clipboard.writeText(myPeerId);
+    alert('Peer ID copied to clipboard!');
   };
 
   return (
@@ -626,21 +523,23 @@ const App: React.FC = () => {
       {/* Background Effects */}
       <div className="absolute top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
         <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-blue-600/20 rounded-full blur-[120px]"></div>
+        <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-purple-600/20 rounded-full blur-[120px]"></div>
       </div>
 
       {/* Navigation */}
       <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
         <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-          <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
-            SecureShare Pro
-          </span>
-          <div className="flex items-center gap-4">
-            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
-              Status: <span className="text-green-400">{connectionStatus}</span>
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-xl flex items-center justify-center">
+              <span className="text-xl">⚡</span>
             </div>
-            <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
-              Transferred: <span className="text-blue-400">{totalFilesTransferred} files</span>
-            </div>
+            <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
+              TurboShare Pro
+            </span>
+          </div>
+          <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700 flex items-center gap-2">
+            <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+            Status: <span className="text-green-400 font-mono">{connectionStatus}</span>
           </div>
         </div>
       </nav>
@@ -651,34 +550,46 @@ const App: React.FC = () => {
         <div className="bg-gray-800 p-1 rounded-xl inline-flex mb-8 shadow-lg border border-gray-700">
           <button
             onClick={() => setActiveTab(Tab.SEND)}
-            className={`px-8 py-3 rounded-lg ${activeTab === Tab.SEND ? 'bg-blue-600 text-white' : 'text-gray-400'}`}
+            className={`px-8 py-3 rounded-lg transition-all ${activeTab === Tab.SEND ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white' : 'text-gray-400 hover:text-white'}`}
           >
-            I want to SEND
+            📤 I want to SEND
           </button>
           <button
             onClick={() => setActiveTab(Tab.RECEIVE)}
-            className={`px-8 py-3 rounded-lg ${activeTab === Tab.RECEIVE ? 'bg-purple-600 text-white' : 'text-gray-400'}`}
+            className={`px-8 py-3 rounded-lg transition-all ${activeTab === Tab.RECEIVE ? 'bg-gradient-to-r from-purple-600 to-pink-500 text-white' : 'text-gray-400 hover:text-white'}`}
           >
-            I want to RECEIVE
+            📥 I want to RECEIVE
           </button>
         </div>
 
         {/* Device ID Display */}
         <div className="mb-8 text-center">
           <p className="text-gray-400 text-sm mb-2">Your Device ID (Share this)</p>
-          <div className="text-4xl font-mono font-bold text-yellow-400 tracking-widest bg-black/30 px-6 py-2 rounded-xl border border-yellow-400/30 select-all">
-            {myPeerId || '...'}
+          <div className="flex items-center gap-3">
+            <div className="text-4xl font-mono font-bold text-yellow-400 tracking-widest bg-black/30 px-6 py-3 rounded-xl border border-yellow-400/30 select-all">
+              {myPeerId || '...'}
+            </div>
+            <button
+              onClick={copyPeerId}
+              className="bg-gray-800 hover:bg-gray-700 px-4 py-3 rounded-xl border border-gray-700"
+              title="Copy to clipboard"
+            >
+              📋
+            </button>
           </div>
-          <p className="text-xs text-gray-500 mt-2">Avg Speed: {averageSpeed.toFixed(1)} MB/s</p>
+          <p className="text-xs text-gray-500 mt-2">Share this ID with the other person to connect</p>
         </div>
 
         {/* Main Panel */}
         <div className="w-full max-w-2xl bg-gray-800/50 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl">
-          {/* SEND Tab */}
           {activeTab === Tab.SEND && (
             <div className="space-y-6">
-              {/* File Selection */}
-              <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500">
+              {/* File Select with Drag & Drop */}
+              <div 
+                className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500 transition-colors"
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+              >
                 <input
                   type="file"
                   multiple
@@ -686,51 +597,77 @@ const App: React.FC = () => {
                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 />
                 <div className="space-y-2">
+                  <div className="w-16 h-16 bg-blue-500/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                    <span className="text-3xl">📁</span>
+                  </div>
                   <p className="text-xl font-medium">
                     {filesQueue.length > 0 
                       ? `${filesQueue.length} files selected` 
                       : "Select Files to Send"}
                   </p>
+                  <p className="text-sm text-gray-400">Drag & drop or click to select files</p>
+                  
                   {filesQueue.length > 0 && (
-                    <div className="text-xs text-gray-400 max-h-20 overflow-y-auto">
-                      {filesQueue.map((f, i) => (
-                        <div key={i} className={i === currentFileIndex ? "text-blue-400 font-bold" : ""}>
-                          {i + 1}. {f.name} ({formatFileSize(f.size)})
-                        </div>
-                      ))}
-                    </div>
+                    <>
+                      <div className="text-xs text-gray-400 max-h-32 overflow-y-auto mt-4">
+                        {filesQueue.map((f, i) => (
+                          <div 
+                            key={i} 
+                            className={`flex items-center justify-between p-2 rounded-lg mb-1 ${i === currentFileIndex ? "bg-blue-500/20" : "bg-gray-900/30"}`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className={i === currentFileIndex ? "text-blue-400" : "text-gray-400"}>
+                                {i === currentFileIndex ? '▶️' : '📄'}
+                              </span>
+                              <span className="truncate max-w-xs">{f.name}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-gray-500">{(f.size / (1024 * 1024)).toFixed(2)} MB</span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  removeFileFromQueue(i);
+                                }}
+                                className="text-gray-500 hover:text-red-400"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        onClick={clearFilesQueue}
+                        className="mt-2 text-sm text-red-400 hover:text-red-300"
+                      >
+                        Clear All
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
 
-              {/* Connection Input */}
+              {/* Receiver ID Input */}
               <div className="flex gap-2 items-center bg-gray-900 p-4 rounded-xl border border-gray-700">
-                <input
-                  type="text"
-                  placeholder="Enter Receiver's ID here"
-                  value={remotePeerId}
-                  onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
-                  className="bg-transparent flex-1 outline-none text-white font-mono uppercase"
-                />
-                <div className="flex gap-2">
-                  <button
-                    onClick={connectToPeer}
-                    className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm"
-                  >
-                    Connect
-                  </button>
-                  {connRef.current && (
-                    <button
-                      onClick={disconnectPeer}
-                      className="bg-red-700 hover:bg-red-600 px-4 py-2 rounded-lg text-sm"
-                    >
-                      Disconnect
-                    </button>
-                  )}
+                <div className="flex-1">
+                  <p className="text-xs text-gray-400 mb-1">Receiver's Device ID</p>
+                  <input
+                    type="text"
+                    placeholder="Enter Receiver's ID here"
+                    value={remotePeerId}
+                    onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
+                    className="bg-transparent w-full outline-none text-white font-mono uppercase placeholder-gray-500"
+                  />
                 </div>
+                <button
+                  onClick={connectToPeer}
+                  className="bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 px-6 py-3 rounded-lg font-medium transition-all"
+                >
+                  Connect
+                </button>
               </div>
 
-              {/* Progress Bar */}
+              {/* Progress Display */}
               {transferProgress > 0 && (
                 <div className="w-full space-y-2">
                   <div className="flex justify-between text-xs text-gray-400 px-1">
@@ -742,9 +679,11 @@ const App: React.FC = () => {
                       className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
                       style={{ width: `${transferProgress}%` }}
                     ></div>
-                    <p className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white drop-shadow-md">
-                      {transferProgress}%
-                    </p>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <p className="text-[10px] font-bold text-white drop-shadow-md">
+                        {transferProgress}%
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}
@@ -752,15 +691,19 @@ const App: React.FC = () => {
               {/* Send Button */}
               <button
                 onClick={sendAllFiles}
-                disabled={filesQueue.length === 0 || connectionStatus.includes('Initializing')}
-                className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50"
+                disabled={filesQueue.length === 0 || !connectionStatus.includes('Connected')}
+                className="w-full bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-700 hover:to-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed py-4 rounded-xl font-bold text-lg shadow-lg transition-all transform hover:scale-[1.02]"
               >
-                Send All Files 🚀
+                🚀 Send All Files
               </button>
+
+              {/* Speed Settings Info */}
+              <div className="text-xs text-gray-500 text-center mt-4">
+                <p>⚡ Turbo Mode: 64KB chunks • 32MB buffer • 4MB drain threshold • 2ms polling</p>
+              </div>
             </div>
           )}
 
-          {/* RECEIVE Tab */}
           {activeTab === Tab.RECEIVE && (
             <div className="space-y-6 text-center">
               <h2 className="text-2xl font-bold">Ready to Receive</h2>
@@ -768,37 +711,47 @@ const App: React.FC = () => {
                 Your ID: <span className="text-yellow-400 font-mono font-bold text-lg">{myPeerId}</span>
               </p>
 
-              {receivedFileMeta && (
+              {receivedFileMeta ? (
                 <div className="bg-gray-700/50 p-4 rounded-xl mt-4">
-                  <p className="font-bold text-lg text-blue-300">Receiving: {receivedFileMeta.name}</p>
-                  <p className="text-sm text-gray-400">
-                    {formatFileSize(receivedFileMeta.size)}
-                  </p>
+                  {/* File Info */}
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="text-left">
+                      <p className="font-bold text-lg text-blue-300">{receivedFileMeta.name}</p>
+                      <p className="text-sm text-gray-400">
+                        {(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB • {receivedFileMeta.type}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className={`text-lg font-bold ${transferSpeed.includes('⚡') ? 'text-cyan-400 animate-pulse' : 'text-green-400'}`}>
+                        {transferSpeed}
+                      </p>
+                      <p className="text-xs text-gray-400">Current Speed</p>
+                    </div>
+                  </div>
 
+                  {/* Progress Bar */}
                   <div className="mt-4 space-y-2">
                     <div className="flex justify-between text-xs text-gray-400 px-1">
                       <span>Progress</span>
-                      <span className={`font-mono font-bold ${transferSpeed.includes('⚡') ? 'text-cyan-400 animate-pulse' : 'text-green-400'}`}>
-                        {transferSpeed}
-                      </span>
+                      <span>{transferProgress}%</span>
                     </div>
                     <div className="w-full bg-gray-600 rounded-full h-3 overflow-hidden">
                       <div
-                        className="bg-green-500 h-full transition-all duration-200 shadow-[0_0_10px_rgba(34,197,94,0.5)]"
+                        className="bg-gradient-to-r from-green-500 to-emerald-400 h-full transition-all duration-200 shadow-[0_0_10px_rgba(34,197,94,0.5)]"
                         style={{ width: `${transferProgress}%` }}
                       ></div>
                     </div>
-                    <p className="text-xs text-right text-gray-300 font-bold">{transferProgress}%</p>
                   </div>
 
                   {/* Motor Confirmation Button */}
                   {!isMotorReady && !isTransferComplete && (
                     <button
                       onClick={prepareMotor}
-                      className="mt-4 w-full bg-green-600 hover:bg-green-500 px-4 py-3 rounded-xl font-bold shadow-lg flex items-center justify-center gap-2"
+                      className="mt-6 w-full bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-700 hover:to-emerald-600 px-4 py-4 rounded-xl font-bold shadow-lg flex items-center justify-center gap-3 transition-all"
                     >
-                      <span>Confirm & Start Receiving</span>
                       <span className="text-lg">⚡</span>
+                      <span>Confirm & Start Receiving</span>
+                      <span className="text-xs bg-black/30 px-2 py-1 rounded">Motor Mode</span>
                     </button>
                   )}
 
@@ -806,88 +759,68 @@ const App: React.FC = () => {
                   {isTransferComplete && !writableStreamRef.current && !isFileSaved && (
                     <button
                       onClick={handleSaveFile}
-                      className="mt-4 block w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-xl font-bold shadow-lg"
+                      className="mt-6 w-full bg-gradient-to-r from-purple-600 to-pink-500 hover:from-purple-700 hover:to-pink-600 py-4 rounded-xl font-bold text-lg shadow-lg transition-all"
                     >
-                      Save File Now 💾
+                      💾 Save File Now
                     </button>
                   )}
 
-                  {/* Already Saved Message */}
+                  {/* Status Messages */}
+                  {isMotorReady && !isTransferComplete && (
+                    <div className="mt-4 p-4 bg-cyan-900/20 border border-cyan-700 rounded-xl">
+                      <p className="text-cyan-300 font-bold flex items-center justify-center gap-2">
+                        <span className="animate-pulse">⚡</span> Motor Mode Active
+                      </p>
+                      <p className="text-sm text-cyan-400 mt-1">Streaming directly to disk</p>
+                    </div>
+                  )}
+
                   {isTransferComplete && (writableStreamRef.current || isFileSaved) && (
-                    <div className="mt-4 p-3 bg-cyan-900/30 border border-cyan-700 rounded-xl">
-                      <p className="text-cyan-300 font-bold">✓ File saved directly to disk!</p>
-                      <p className="text-xs text-cyan-400 mt-1">Check your downloads folder</p>
+                    <div className="mt-4 p-4 bg-gradient-to-r from-green-900/20 to-emerald-900/20 border border-emerald-700 rounded-xl">
+                      <div className="w-12 h-12 bg-emerald-500/20 rounded-full flex items-center justify-center mx-auto mb-3">
+                        <span className="text-2xl">✅</span>
+                      </div>
+                      <p className="text-emerald-300 font-bold text-lg">✓ File saved successfully!</p>
+                      <p className="text-xs text-emerald-400 mt-1">Check your downloads folder</p>
+                    </div>
+                  )}
+
+                  {/* Stats Info */}
+                  {transferStatsRef.current.peakSpeed > 0 && (
+                    <div className="mt-4 text-xs text-gray-400">
+                      <p>Peak Speed: <span className="text-yellow-400">{transferStatsRef.current.peakSpeed.toFixed(1)} MB/s</span></p>
                     </div>
                   )}
                 </div>
-              )}
-
-              {!receivedFileMeta && (
-                <div className="text-gray-500 text-sm mt-4">
-                  Waiting for sender to connect...
-                  <p className="text-xs mt-2">Share your ID above with the sender</p>
+              ) : (
+                <div className="text-gray-500 text-sm mt-4 p-8 border-2 border-dashed border-gray-700 rounded-2xl">
+                  <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <span className="text-2xl">⏳</span>
+                  </div>
+                  <p className="text-lg mb-2">Waiting for sender to connect...</p>
+                  <p className="text-sm">Share your ID with the sender</p>
+                  <p className="text-xs mt-4 text-gray-600">Your connection is encrypted end-to-end</p>
                 </div>
               )}
             </div>
           )}
         </div>
 
-        {/* Transfer Logs Panel */}
-        <div className="w-full max-w-2xl mt-8 bg-gray-800/30 backdrop-blur-xl border border-white/10 rounded-3xl p-6 shadow-2xl">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-bold">Transfer Logs</h3>
-            <button
-              onClick={clearLogs}
-              className="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded"
-            >
-              Clear
-            </button>
+        {/* Performance Stats */}
+        <div className="mt-8 grid grid-cols-3 gap-4 w-full max-w-2xl">
+          <div className="bg-gray-800/30 p-4 rounded-xl border border-gray-700 text-center">
+            <p className="text-sm text-gray-400">Connection</p>
+            <p className={`text-lg font-bold ${connectionStatus.includes('Connected') ? 'text-green-400' : 'text-yellow-400'}`}>
+              {connectionStatus.includes('Connected') ? '🟢 Live' : '🟡 Idle'}
+            </p>
           </div>
-          
-          <div className="space-y-2 max-h-60 overflow-y-auto">
-            {transferLogs.length === 0 ? (
-              <p className="text-gray-500 text-sm text-center py-4">No transfers yet</p>
-            ) : (
-              transferLogs.map((log) => (
-                <div 
-                  key={log.id}
-                  className={`p-3 rounded-lg text-sm ${
-                    log.status === 'success' ? 'bg-green-900/20 border border-green-800/30' :
-                    log.status === 'failed' ? 'bg-red-900/20 border border-red-800/30' :
-                    'bg-yellow-900/20 border border-yellow-800/30'
-                  }`}
-                >
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <span className={`font-bold ${
-                        log.type === 'send' ? 'text-blue-400' :
-                        log.type === 'receive' ? 'text-purple-400' :
-                        'text-gray-400'
-                      }`}>
-                        {log.type === 'send' ? '📤 SEND' : 
-                         log.type === 'receive' ? '📥 RECEIVE' : '⚙️ SYSTEM'}
-                      </span>
-                      <span className="ml-2 text-gray-300">{log.fileName}</span>
-                    </div>
-                    <div className="text-xs text-gray-400">
-                      {log.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                    </div>
-                  </div>
-                  {log.fileSize > 0 && (
-                    <div className="flex justify-between text-xs mt-1">
-                      <span className="text-gray-400">{formatFileSize(log.fileSize)}</span>
-                      <span className={`font-mono ${
-                        log.status === 'success' ? 'text-green-400' :
-                        log.status === 'failed' ? 'text-red-400' :
-                        'text-yellow-400'
-                      }`}>
-                        {log.speed}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
+          <div className="bg-gray-800/30 p-4 rounded-xl border border-gray-700 text-center">
+            <p className="text-sm text-gray-400">Files in Queue</p>
+            <p className="text-lg font-bold">{filesQueue.length}</p>
+          </div>
+          <div className="bg-gray-800/30 p-4 rounded-xl border border-gray-700 text-center">
+            <p className="text-sm text-gray-400">Transfer Mode</p>
+            <p className="text-lg font-bold">⚡ Turbo</p>
           </div>
         </div>
       </main>
@@ -897,24 +830,40 @@ const App: React.FC = () => {
         {!isChatOpen && (
           <button
             onClick={() => setIsChatOpen(true)}
-            className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white"
+            className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white hover:scale-110 transition-transform"
           >
             💬
           </button>
         )}
 
         {isChatOpen && (
-          <div className="w-[350px] h-[500px] flex flex-col relative">
-            <button
-              onClick={() => setIsChatOpen(false)}
-              className="absolute -top-3 -right-3 w-8 h-8 bg-gray-700 text-white rounded-full flex items-center justify-center shadow-lg z-10"
-            >
-              X
-            </button>
-            <ChatBot />
+          <div className="w-[350px] h-[500px] flex flex-col relative bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl">
+            <div className="bg-gradient-to-r from-blue-600 to-cyan-500 p-4 rounded-t-2xl">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                  <span>🤖</span>
+                  <span className="font-bold">AI Assistant</span>
+                </div>
+                <button
+                  onClick={() => setIsChatOpen(false)}
+                  className="w-8 h-8 bg-black/30 hover:bg-black/50 rounded-full flex items-center justify-center"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="flex-1">
+              <ChatBot />
+            </div>
           </div>
         )}
       </div>
+
+      {/* Footer */}
+      <footer className="relative z-10 text-center text-gray-500 text-sm mt-12 pb-6">
+        <p>TurboShare Pro • Powered by WebRTC & PeerJS</p>
+        <p className="text-xs mt-1">End-to-end encrypted • No servers involved</p>
+      </footer>
     </div>
   );
 };
