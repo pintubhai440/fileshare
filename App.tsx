@@ -18,8 +18,9 @@ const App: React.FC = () => {
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
   
-  // Send State
-  const [fileToSend, setFileToSend] = useState<File | null>(null);
+  // Send State (MULTIPLE FILES SUPPORT)
+  const [filesQueue, setFilesQueue] = useState<File[]>([]);
+  const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [transferProgress, setTransferProgress] = useState(0);
   const [transferSpeed, setTransferSpeed] = useState<string>('0.0 MB/s');
   
@@ -41,6 +42,7 @@ const App: React.FC = () => {
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
 
+  // Initialize PeerJS
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const peer = new Peer(shortId, {
@@ -71,7 +73,7 @@ const App: React.FC = () => {
     };
   }, []);
 
-  // Updated Receiver Logic with Motor
+  // Receiver Logic (Motor Mode Enabled)
   const setupReceiverEvents = (conn: DataConnection) => {
     conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
     
@@ -96,7 +98,7 @@ const App: React.FC = () => {
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        // Reset everything
+        // Reset everything for new file
         chunksRef.current = [];
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
@@ -187,10 +189,11 @@ const App: React.FC = () => {
     lastBytesRef.current = bytesReceivedRef.current;
   };
 
-  // Sender Logic
+  // Sender Logic (MULTIPLE FILES)
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFileToSend(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      setFilesQueue(Array.from(e.target.files));
+      setCurrentFileIndex(0);
       setTransferProgress(0);
       setTransferSpeed('0.0 MB/s');
     }
@@ -207,38 +210,61 @@ const App: React.FC = () => {
     setupReceiverEvents(conn);
   };
 
-  const sendFile = () => {
-    if (!connRef.current || !fileToSend) {
-      alert("No connection or file!");
+  // Send all files in queue
+  const sendAllFiles = () => {
+    if (!connRef.current || filesQueue.length === 0) {
+      alert("No connection or files!");
       return;
     }
     
-    const conn = connRef.current;
-    
-    // Send file metadata
+    // Start with the first file
+    processFileQueue(0);
+  };
+
+  const processFileQueue = (index: number) => {
+    if (index >= filesQueue.length) {
+      setTransferSpeed('All Files Sent Successfully! 🎉');
+      return;
+    }
+
+    const file = filesQueue[index];
+    setCurrentFileIndex(index);
+    const conn = connRef.current!;
+
+    // 1. Send file metadata
     conn.send({
       type: 'meta',
       meta: {
-        name: fileToSend.name,
-        size: fileToSend.size,
-        type: fileToSend.type
+        name: file.name,
+        size: file.size,
+        type: file.type
       }
     });
-    
+
     setTransferProgress(1);
-    
-    // Wait for receiver to confirm they're ready
-    conn.on('data', (data: any) => {
+    setTransferSpeed(`Waiting for receiver to accept: ${file.name}...`);
+
+    // 2. Wait for 'ready_to_receive' for THIS file
+    const onReady = (data: any) => {
       if (data.type === 'ready_to_receive') {
-        startPumping(conn);
+        // Clean up this listener
+        conn.off('data', onReady);
+        
+        // 3. Start Pumping this file
+        startPumping(conn, file, () => {
+          // 4. On Complete, trigger next file
+          setTimeout(() => {
+            processFileQueue(index + 1);
+          }, 500);
+        });
       }
-    });
+    };
+
+    conn.on('data', onReady);
   };
 
   // 🔥 AGGRESSIVE SPEED ENGINE (64KB Chunks + High Pressure Loop)
-  const startPumping = (conn: DataConnection) => {
-    if (!fileToSend) return;
-
+  const startPumping = (conn: DataConnection, file: File, onComplete: () => void) => {
     // BEST SETTINGS FOR MAX SPEED:
     const CHUNK_SIZE = 64 * 1024; // 64KB रखें
     const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
@@ -274,7 +300,7 @@ const App: React.FC = () => {
         // UI Update Logic (Har 300ms pe update, taaki CPU free rahe)
         const now = Date.now();
         if (now - lastUpdateRef.current > 300) {
-          const progress = Math.min(100, Math.round((offset / fileToSend.size) * 100));
+          const progress = Math.min(100, Math.round((offset / file.size) * 100));
           const bytesDiff = offset - lastBytesRef.current;
           const timeDiff = (now - lastUpdateRef.current) / 1000;
           if (timeDiff > 0) {
@@ -286,7 +312,7 @@ const App: React.FC = () => {
           lastBytesRef.current = offset;
         }
 
-        if (offset < fileToSend.size) {
+        if (offset < file.size) {
           // 🔥 CRITICAL LOOP LOGIC 🔥
           // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
           if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
@@ -299,6 +325,7 @@ const App: React.FC = () => {
           conn.send({ type: 'end' });
           setTransferProgress(100);
           setTransferSpeed('Sent');
+          onComplete(); // Move to next file
         }
       } catch (err) {
         console.error("Error sending, retrying...", err);
@@ -307,7 +334,7 @@ const App: React.FC = () => {
     };
 
     const readNextChunk = () => {
-      const slice = fileToSend.slice(offset, offset + CHUNK_SIZE);
+      const slice = file.slice(offset, offset + CHUNK_SIZE);
       fileReader.readAsArrayBuffer(slice);
     };
 
@@ -409,24 +436,31 @@ const App: React.FC = () => {
 
         {/* Main Panel */}
         <div className="w-full max-w-2xl bg-gray-800/50 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl">
-          {/* SEND Tab */}
+          {/* SEND Tab (MULTIPLE FILES SUPPORT) */}
           {activeTab === Tab.SEND && (
             <div className="space-y-6">
-              {/* File Select */}
+              {/* File Select - MULTIPLE FILES ENABLED */}
               <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500">
                 <input
                   type="file"
+                  multiple
                   onChange={handleFileSelect}
                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 />
                 <div className="space-y-2">
                   <p className="text-xl font-medium">
-                    {fileToSend ? fileToSend.name : "Select File to Send"}
+                    {filesQueue.length > 0 
+                      ? `${filesQueue.length} files selected` 
+                      : "Select Files to Send"}
                   </p>
-                  {fileToSend && (
-                    <p className="text-xs text-gray-400">
-                      {(fileToSend.size / (1024 * 1024)).toFixed(2)} MB
-                    </p>
+                  {filesQueue.length > 0 && (
+                    <div className="text-xs text-gray-400 max-h-20 overflow-y-auto">
+                      {filesQueue.map((f, i) => (
+                        <div key={i} className={i === currentFileIndex ? "text-blue-400 font-bold" : ""}>
+                          {i + 1}. {f.name} ({(f.size / (1024 * 1024)).toFixed(2)} MB)
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
               </div>
@@ -452,7 +486,7 @@ const App: React.FC = () => {
               {transferProgress > 0 && (
                 <div className="w-full space-y-2">
                   <div className="flex justify-between text-xs text-gray-400 px-1">
-                    <span>Sending...</span>
+                    <span>Sending File {currentFileIndex + 1} of {filesQueue.length}</span>
                     <span className="text-green-400 font-mono font-bold">{transferSpeed}</span>
                   </div>
                   <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden relative">
@@ -467,18 +501,18 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              {/* Send Button */}
+              {/* Send All Files Button */}
               <button
-                onClick={sendFile}
-                disabled={!fileToSend || connectionStatus.includes('Initializing')}
+                onClick={sendAllFiles}
+                disabled={filesQueue.length === 0 || connectionStatus.includes('Initializing')}
                 className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50"
               >
-                Send Instantly 🚀
+                Send All Files 🚀
               </button>
             </div>
           )}
 
-          {/* RECEIVE Tab */}
+          {/* RECEIVE Tab (WITH MOTOR MODE) */}
           {activeTab === Tab.RECEIVE && (
             <div className="space-y-6 text-center">
               <h2 className="text-2xl font-bold">Ready to Receive</h2>
