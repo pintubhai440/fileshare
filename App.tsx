@@ -1,615 +1,1472 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Tab } from './types';
 import { ChatBot } from './components/ChatBot';
 import Peer, { DataConnection } from 'peerjs';
 
 interface FileMeta {
-  name: string;
-  size: number;
-  type: string;
+  name: string;
+  size: number;
+  type: string;
+  lastModified?: number;
+}
+
+interface TransferStats {
+  startTime: number;
+  endTime: number;
+  totalBytes: number;
+  speedHistory: number[];
+}
+
+interface QueuedFile {
+  file: File;
+  index: number;
+  status: 'pending' | 'sending' | 'sent' | 'failed';
+  progress: number;
+  speed: string;
 }
 
 const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<Tab>(Tab.SEND);
-  
-  // PeerJS State
-  const [myPeerId, setMyPeerId] = useState<string>('');
-  const [connectionStatus, setConnectionStatus] = useState<string>('Initializing...');
-  const peerRef = useRef<Peer | null>(null);
-  const connRef = useRef<DataConnection | null>(null);
-  
-  // Send State (MULTIPLE FILES SUPPORT)
-  const [filesQueue, setFilesQueue] = useState<File[]>([]);
-  const [currentFileIndex, setCurrentFileIndex] = useState(0);
-  const [transferProgress, setTransferProgress] = useState(0);
-  const [transferSpeed, setTransferSpeed] = useState<string>('0.0 MB/s');
-  
-  // Receive State
-  const [remotePeerId, setRemotePeerId] = useState('');
-  const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
-  const [isTransferComplete, setIsTransferComplete] = useState(false);
-  const [isMotorReady, setIsMotorReady] = useState(false);
-  const [isFileSaved, setIsFileSaved] = useState(false);
-  
-  // High Performance Refs
-  const chunksRef = useRef<ArrayBuffer[]>([]);
-  const bytesReceivedRef = useRef(0);
-  const lastUpdateRef = useRef(0);
-  const lastBytesRef = useRef(0);
-  const receivedFileMetaRef = useRef<FileMeta | null>(null);
-  
-  // File System Access API
-  const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
-  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>(Tab.SEND);
+  
+  // PeerJS State
+  const [myPeerId, setMyPeerId] = useState<string>('');
+  const [connectionStatus, setConnectionStatus] = useState<string>('Initializing...');
+  const [isConnected, setIsConnected] = useState(false);
+  const peerRef = useRef<Peer | null>(null);
+  const connRef = useRef<DataConnection | null>(null);
+  
+  // Send State (ENHANCED MULTIPLE FILES SUPPORT)
+  const [filesQueue, setFilesQueue] = useState<QueuedFile[]>([]);
+  const [currentFileIndex, setCurrentFileIndex] = useState(0);
+  const [overallProgress, setOverallProgress] = useState(0);
+  const [transferSpeed, setTransferSpeed] = useState<string>('0.0 MB/s');
+  const [estimatedTime, setEstimatedTime] = useState<string>('Calculating...');
+  const [transferStats, setTransferStats] = useState<TransferStats | null>(null);
+  
+  // Receive State
+  const [remotePeerId, setRemotePeerId] = useState('');
+  const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
+  const [receivedFiles, setReceivedFiles] = useState<Array<{meta: FileMeta, url: string}>>([]);
+  const [isTransferComplete, setIsTransferComplete] = useState(false);
+  const [isMotorReady, setIsMotorReady] = useState(false);
+  const [isFileSaved, setIsFileSaved] = useState(false);
+  const [receiverProgress, setReceiverProgress] = useState(0);
+  
+  // High Performance Refs
+  const chunksRef = useRef<BlobPart[]>([]);
+  const bytesReceivedRef = useRef(0);
+  const bytesSentRef = useRef(0);
+  const lastUpdateRef = useRef(0);
+  const lastBytesRef = useRef(0);
+  const receivedFileMetaRef = useRef<FileMeta | null>(null);
+  const speedHistoryRef = useRef<number[]>([]);
+  
+  // File System Access API
+  const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [showTransferHistory, setShowTransferHistory] = useState(false);
+  
+  // Statistics
+  const [totalTransferred, setTotalTransferred] = useState(0);
+  const [filesTransferred, setFilesTransferred] = useState(0);
+  const [maxSpeed, setMaxSpeed] = useState(0);
 
-  // Initialize PeerJS
-  useEffect(() => {
-    const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
-    const peer = new Peer(shortId, {
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
-      }
-    });
+  // Initialize PeerJS with better error handling
+  useEffect(() => {
+    const generateShortId = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      let result = '';
+      for (let i = 0; i < 4; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return result;
+    };
 
-    peer.on('open', (id) => {
-      setMyPeerId(id);
-      setConnectionStatus('Ready to Connect');
-    });
+    const initializePeer = async () => {
+      const shortId = generateShortId();
+      
+      try {
+        const peer = new Peer(shortId, {
+          debug: 0,
+          config: {
+            iceServers: [
+              { urls: 'stun:stun.l.google.com:19302' },
+              { urls: 'stun:global.stun.twilio.com:3478' },
+              { urls: 'stun:stun1.l.google.com:19302' },
+              { urls: 'stun:stun2.l.google.com:19302' }
+            ]
+          },
+          secure: true
+        });
 
-    peer.on('connection', (conn) => {
-      connRef.current = conn;
-      setConnectionStatus(`Connected to ${conn.peer}`);
-      setupReceiverEvents(conn);
-    });
+        peer.on('open', (id) => {
+          setMyPeerId(id);
+          setConnectionStatus('Ready to Connect');
+          setIsConnected(true);
+          console.log('PeerJS initialized with ID:', id);
+        });
 
-    peerRef.current = peer;
+        peer.on('connection', (conn) => {
+          console.log('Incoming connection from:', conn.peer);
+          connRef.current = conn;
+          setConnectionStatus(`Connected to ${conn.peer}`);
+          setIsConnected(true);
+          setupReceiverEvents(conn);
+          
+          // Auto-switch to receive tab if sender connects
+          if (activeTab === Tab.SEND) {
+            setActiveTab(Tab.RECEIVE);
+          }
+        });
 
-    return () => {
-      peer.destroy();
-    };
-  }, []);
+        peer.on('error', (err) => {
+          console.error('PeerJS error:', err);
+          setConnectionStatus(`Error: ${err.type}`);
+          setIsConnected(false);
+          
+          // Attempt to reconnect
+          if (err.type === 'lost' || err.type === 'disconnected') {
+            setTimeout(() => {
+              initializePeer();
+            }, 2000);
+          }
+        });
 
-  // Receiver Logic (Motor Mode Enabled)
-  const setupReceiverEvents = (conn: DataConnection) => {
-    conn.on('open', () => setConnectionStatus(`Connected securely to ${conn.peer}`));
-    
-    conn.on('data', async (data: any) => {
-      const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
-      
-      if (isBinary) {
-        const buffer = data instanceof Uint8Array ? data.buffer : data;
-        
-        // Motor Mode: Stream directly to disk
-        if (writableStreamRef.current) {
-          await writableStreamRef.current.write(new Uint8Array(buffer));
-          bytesReceivedRef.current += buffer.byteLength;
-        } else {
-          // Fallback: Store in memory
-          chunksRef.current.push(buffer);
-          bytesReceivedRef.current += buffer.byteLength;
-        }
-        updateProgress();
-      } 
-      else if (data.type === 'meta') {
-        receivedFileMetaRef.current = data.meta;
-        setReceivedFileMeta(data.meta);
-        
-        // Reset everything for new file
-        chunksRef.current = [];
-        bytesReceivedRef.current = 0;
-        lastBytesRef.current = 0;
-        lastUpdateRef.current = Date.now();
-        setIsTransferComplete(false);
-        setIsMotorReady(false);
-        setIsFileSaved(false);
-        setTransferProgress(0);
-        setTransferSpeed('Starting...');
-        
-        // Close any existing stream
-        if (writableStreamRef.current) {
-          await writableStreamRef.current.close();
-          writableStreamRef.current = null;
-        }
-      } 
-      else if (data.type === 'end') {
-        if (writableStreamRef.current) {
-          await writableStreamRef.current.close();
-          writableStreamRef.current = null;
-          setIsFileSaved(true);
-        }
-        setTransferProgress(100);
-        setTransferSpeed('Completed');
-        setIsTransferComplete(true);
-      } 
-      else if (data.type === 'ready_to_receive') {
-        // Sender is ready, we already handled this in prepareMotor
-      }
-    });
-    
-    conn.on('close', () => {
-      setConnectionStatus('Connection Closed');
-      setTransferProgress(0);
-    });
-  };
+        peer.on('disconnected', () => {
+          console.log('Peer disconnected');
+          setConnectionStatus('Disconnected - Reconnecting...');
+          setIsConnected(false);
+        });
 
-  // Motor - Prepare file system for streaming
-  const prepareMotor = async () => {
-    if (!receivedFileMetaRef.current || !connRef.current) return;
-    const meta = receivedFileMetaRef.current;
-    
-    if ('showSaveFilePicker' in window) {
-      try {
-        const handle = await (window as any).showSaveFilePicker({
-          suggestedName: meta.name,
-          types: [{
-            description: 'File Transfer',
-            accept: { [meta.type]: [] }
-          }]
-        });
-        
-        writableStreamRef.current = await handle.createWritable();
-        setIsMotorReady(true);
-        setTransferSpeed('Motor Ready ⚡');
-        
-        // Notify sender we're ready
-        connRef.current.send({ type: 'ready_to_receive' });
-      } catch (err) {
-        console.log("User cancelled file save dialog");
-        setTransferSpeed('Save cancelled');
-      }
-    } else {
-      // Fallback mode
-      setIsMotorReady(true);
-      connRef.current.send({ type: 'ready_to_receive' });
-      setTransferSpeed('Ready (Fallback Mode)');
-    }
-  };
+        peer.on('close', () => {
+          console.log('Peer closed');
+          setConnectionStatus('Connection Closed');
+          setIsConnected(false);
+        });
 
-  // Progress update function
-  const updateProgress = () => {
-    if (!receivedFileMetaRef.current) return;
-    
-    const now = Date.now();
-    if (now - lastUpdateRef.current < 300) return;
-    
-    const total = receivedFileMetaRef.current.size;
-    const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
-    const bytesDiff = bytesReceivedRef.current - lastBytesRef.current;
-    const timeDiff = (now - lastUpdateRef.current) / 1000;
-    const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-    
-    setTransferProgress(percent);
-    setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-    
-    lastUpdateRef.current = now;
-    lastBytesRef.current = bytesReceivedRef.current;
-  };
+        peerRef.current = peer;
+      } catch (error) {
+        console.error('Failed to initialize PeerJS:', error);
+        setConnectionStatus('Failed to initialize - Retrying...');
+        setTimeout(() => initializePeer(), 3000);
+      }
+    };
 
-  // Sender Logic (MULTIPLE FILES)
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      setFilesQueue(Array.from(e.target.files));
-      setCurrentFileIndex(0);
-      setTransferProgress(0);
-      setTransferSpeed('0.0 MB/s');
-    }
-  };
+    initializePeer();
 
-  const connectToPeer = () => {
-    if (!remotePeerId || !peerRef.current) return;
-    
-    setConnectionStatus('Connecting...');
-    const conn = peerRef.current.connect(remotePeerId.toUpperCase(), {
-      reliable: true
-    });
-    connRef.current = conn;
-    setupReceiverEvents(conn);
-  };
+    return () => {
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
+    };
+  }, []);
 
-  // Send all files in queue
-  const sendAllFiles = () => {
-    if (!connRef.current || filesQueue.length === 0) {
-      alert("No connection or files!");
-      return;
-    }
-    
-    // Start with the first file
-    processFileQueue(0);
-  };
+  // Enhanced Receiver Logic with error handling
+  const setupReceiverEvents = useCallback((conn: DataConnection) => {
+    conn.on('open', () => {
+      console.log('Data connection opened');
+      setConnectionStatus(`Connected securely to ${conn.peer}`);
+      setIsConnected(true);
+    });
+    
+    conn.on('data', async (data: any) => {
+      const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
+      
+      if (isBinary) {
+        // Handle binary data with proper typing
+        const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
+        
+        // Motor Mode: Stream directly to disk
+        if (writableStreamRef.current) {
+          try {
+            await writableStreamRef.current.write(chunk);
+            bytesReceivedRef.current += chunk.byteLength;
+          } catch (writeError) {
+            console.error('Error writing to stream:', writeError);
+            // Fallback to memory storage
+            chunksRef.current.push(chunk);
+          }
+        } else {
+          // Store in memory
+          chunksRef.current.push(chunk);
+          bytesReceivedRef.current += chunk.byteLength;
+        }
+        updateProgress();
+      } 
+      else if (data.type === 'meta') {
+        console.log('Received file metadata:', data.meta);
+        receivedFileMetaRef.current = data.meta;
+        setReceivedFileMeta(data.meta);
+        
+        // Reset state for new file
+        chunksRef.current = [];
+        bytesReceivedRef.current = 0;
+        lastBytesRef.current = 0;
+        lastUpdateRef.current = Date.now();
+        setIsTransferComplete(false);
+        setIsMotorReady(false);
+        setIsFileSaved(false);
+        setReceiverProgress(0);
+        setTransferSpeed('Starting...');
+        
+        // Close any existing stream
+        if (writableStreamRef.current) {
+          await writableStreamRef.current.close();
+          writableStreamRef.current = null;
+        }
+      } 
+      else if (data.type === 'end') {
+        console.log('Transfer complete');
+        if (writableStreamRef.current) {
+          await writableStreamRef.current.close();
+          writableStreamRef.current = null;
+          setIsFileSaved(true);
+        }
+        setReceiverProgress(100);
+        setTransferSpeed('Completed');
+        setIsTransferComplete(true);
+        
+        // Update statistics
+        const meta = receivedFileMetaRef.current;
+        if (meta) {
+          setTotalTransferred(prev => prev + meta.size);
+          setFilesTransferred(prev => prev + 1);
+          
+          // Create download URL for received file
+          if (chunksRef.current.length > 0) {
+            const blob = new Blob(chunksRef.current, { type: meta.type });
+            const url = URL.createObjectURL(blob);
+            setReceivedFiles(prev => [...prev, { meta, url }]);
+          }
+        }
+      } 
+      else if (data.type === 'ready_to_receive') {
+        console.log('Receiver is ready');
+      }
+      else if (data.type === 'transfer_cancelled') {
+        console.log('Transfer cancelled by sender');
+        setConnectionStatus('Transfer cancelled');
+        resetTransfer();
+      }
+    });
+    
+    conn.on('close', () => {
+      console.log('Data connection closed');
+      setConnectionStatus('Connection Closed');
+      setIsConnected(false);
+      setReceiverProgress(0);
+    });
+    
+    conn.on('error', (err) => {
+      console.error('Connection error:', err);
+      setConnectionStatus(`Error: ${err.message}`);
+    });
+  }, []);
 
-  const processFileQueue = (index: number) => {
-    if (index >= filesQueue.length) {
-      setTransferSpeed('All Files Sent Successfully! 🎉');
-      return;
-    }
+  // Enhanced Motor Mode with better file handling
+  const prepareMotor = async () => {
+    if (!receivedFileMetaRef.current || !connRef.current) {
+      alert('No file metadata or connection available');
+      return;
+    }
+    
+    const meta = receivedFileMetaRef.current;
+    setTransferSpeed('Preparing Motor Mode...');
+    
+    // Check for File System Access API support
+    if ('showSaveFilePicker' in window) {
+      try {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: meta.name,
+          types: [{
+            description: 'File Transfer',
+            accept: { [meta.type]: [] }
+          }],
+          excludeAcceptAllOption: false
+        });
+        
+        writableStreamRef.current = await handle.createWritable();
+        setIsMotorReady(true);
+        setTransferSpeed('Motor Ready ⚡');
+        
+        // Notify sender we're ready
+        connRef.current.send({ type: 'ready_to_receive' });
+        
+        // Start progress tracking
+        lastUpdateRef.current = Date.now();
+        lastBytesRef.current = 0;
+      } catch (err: any) {
+        console.log('File save dialog cancelled or failed:', err);
+        
+        // User cancelled, fall back to auto mode
+        if (err.name !== 'AbortError') {
+          setIsMotorReady(true); // Auto-ready without popup
+          connRef.current.send({ type: 'ready_to_receive' });
+          setTransferSpeed('Ready (Auto-Save Mode)');
+        } else {
+          setTransferSpeed('Save cancelled');
+        }
+      }
+    } else {
+      // Fallback mode for Firefox/Mobile
+      setIsMotorReady(true);
+      connRef.current.send({ type: 'ready_to_receive' });
+      setTransferSpeed('Ready (Auto-Save Mode)');
+    }
+  };
 
-    const file = filesQueue[index];
-    setCurrentFileIndex(index);
-    const conn = connRef.current!;
+  // Enhanced progress update with ETA calculation
+  const updateProgress = useCallback(() => {
+    if (!receivedFileMetaRef.current) return;
+    
+    const now = Date.now();
+    if (now - lastUpdateRef.current < 200) return;
+    
+    const total = receivedFileMetaRef.current.size;
+    const bytesReceived = bytesReceivedRef.current;
+    const percent = Math.min(100, Math.round((bytesReceived / total) * 100));
+    
+    // Calculate speed
+    const bytesDiff = bytesReceived - lastBytesRef.current;
+    const timeDiff = (now - lastUpdateRef.current) / 1000;
+    const speedMBps = timeDiff > 0 ? (bytesDiff / timeDiff) / (1024 * 1024) : 0;
+    
+    // Update speed history
+    speedHistoryRef.current.push(speedMBps);
+    if (speedHistoryRef.current.length > 10) {
+      speedHistoryRef.current.shift();
+    }
+    
+    // Calculate average speed
+    const avgSpeed = speedHistoryRef.current.reduce((a, b) => a + b, 0) / speedHistoryRef.current.length;
+    
+    // Calculate ETA
+    const bytesRemaining = total - bytesReceived;
+    const etaSeconds = avgSpeed > 0 ? bytesRemaining / (avgSpeed * 1024 * 1024) : Infinity;
+    
+    // Format ETA
+    let etaString = 'Calculating...';
+    if (etaSeconds < 60) {
+      etaString = `${Math.ceil(etaSeconds)} seconds`;
+    } else if (etaSeconds < 3600) {
+      etaString = `${Math.ceil(etaSeconds / 60)} minutes`;
+    } else {
+      etaString = `${(etaSeconds / 3600).toFixed(1)} hours`;
+    }
+    
+    // Update max speed
+    if (speedMBps > maxSpeed) {
+      setMaxSpeed(speedMBps);
+    }
+    
+    setReceiverProgress(percent);
+    setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
+    setEstimatedTime(etaString);
+    
+    lastUpdateRef.current = now;
+    lastBytesRef.current = bytesReceived;
+  }, [maxSpeed]);
 
-    // 1. Send file metadata
-    conn.send({
-      type: 'meta',
-      meta: {
-        name: file.name,
-        size: file.size,
-        type: file.type
-      }
-    });
+  // Enhanced file selection with validation
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    
+    const fileList = Array.from(e.target.files);
+    const validFiles: QueuedFile[] = [];
+    
+    // Validate each file
+    fileList.forEach((file, index) => {
+      if (file.size > 2 * 1024 * 1024 * 1024) { // 2GB limit
+        alert(`File "${file.name}" exceeds 2GB limit and will be skipped`);
+        return;
+      }
+      
+      validFiles.push({
+        file,
+        index,
+        status: 'pending',
+        progress: 0,
+        speed: '0.0 MB/s'
+      });
+    });
+    
+    if (validFiles.length === 0) {
+      alert('No valid files selected');
+      return;
+    }
+    
+    setFilesQueue(validFiles);
+    setCurrentFileIndex(0);
+    setOverallProgress(0);
+    setTransferSpeed('0.0 MB/s');
+    setEstimatedTime('Calculating...');
+    
+    // Calculate total size
+    const totalSize = validFiles.reduce((sum, qf) => sum + qf.file.size, 0);
+    console.log(`Selected ${validFiles.length} files, total size: ${(totalSize / (1024 * 1024 * 1024)).toFixed(2)} GB`);
+  };
 
-    setTransferProgress(1);
-    setTransferSpeed(`Waiting for receiver to accept: ${file.name}...`);
+  // Enhanced connection function
+  const connectToPeer = () => {
+    if (!remotePeerId.trim()) {
+      alert('Please enter a Peer ID');
+      return;
+    }
+    
+    if (!peerRef.current) {
+      alert('Peer not initialized yet');
+      return;
+    }
+    
+    const peerId = remotePeerId.toUpperCase().trim();
+    setConnectionStatus('Connecting...');
+    
+    try {
+      const conn = peerRef.current.connect(peerId, {
+        reliable: true,
+        serialization: 'binary'
+      });
+      
+      connRef.current = conn;
+      setupReceiverEvents(conn);
+      
+      conn.on('open', () => {
+        setConnectionStatus(`Connected to ${peerId}`);
+        setIsConnected(true);
+      });
+      
+      conn.on('error', (err) => {
+        console.error('Connection failed:', err);
+        setConnectionStatus(`Failed to connect: ${err.message}`);
+        setIsConnected(false);
+      });
+    } catch (error) {
+      console.error('Connection error:', error);
+      setConnectionStatus('Connection failed');
+      setIsConnected(false);
+    }
+  };
 
-    // 2. Wait for 'ready_to_receive' for THIS file
-    const onReady = (data: any) => {
-      if (data.type === 'ready_to_receive') {
-        // Clean up this listener
-        conn.off('data', onReady);
-        
-        // 3. Start Pumping this file
-        startPumping(conn, file, () => {
-          // 4. On Complete, trigger next file
-          setTimeout(() => {
-            processFileQueue(index + 1);
-          }, 500);
-        });
-      }
-    };
+  // Enhanced file queue processing
+  const sendAllFiles = async () => {
+    if (!connRef.current || !connRef.current.open) {
+      alert('Not connected to a peer');
+      return;
+    }
+    
+    if (filesQueue.length === 0) {
+      alert('No files selected');
+      return;
+    }
+    
+    // Initialize transfer stats
+    const stats: TransferStats = {
+      startTime: Date.now(),
+      endTime: 0,
+      totalBytes: filesQueue.reduce((sum, qf) => sum + qf.file.size, 0),
+      speedHistory: []
+    };
+    setTransferStats(stats);
+    
+    // Update first file status
+    setFilesQueue(prev => prev.map((qf, idx) => 
+      idx === 0 ? { ...qf, status: 'sending' } : qf
+    ));
+    
+    // Start sending files
+    await processFileQueue(0);
+  };
 
-    conn.on('data', onReady);
-  };
+  // Enhanced file queue processing with better error handling
+  const processFileQueue = async (index: number): Promise<void> => {
+    if (index >= filesQueue.length) {
+      // All files sent
+      setTransferSpeed('All Files Sent Successfully! 🎉');
+      if (transferStats) {
+        setTransferStats(prev => prev ? {
+          ...prev,
+          endTime: Date.now()
+        } : null);
+      }
+      return;
+    }
+    
+    const queuedFile = filesQueue[index];
+    const file = queuedFile.file;
+    setCurrentFileIndex(index);
+    
+    if (!connRef.current) {
+      alert('Connection lost');
+      return;
+    }
+    
+    const conn = connRef.current;
+    
+    try {
+      // 1. Send file metadata
+      conn.send({
+        type: 'meta',
+        meta: {
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          lastModified: file.lastModified
+        }
+      });
+      
+      setTransferSpeed(`Waiting for receiver to accept: ${file.name}...`);
+      
+      // Wait for receiver confirmation with timeout
+      const waitForReady = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          conn.off('data', onReady);
+          reject(new Error('Receiver not ready (timeout)'));
+        }, 30000); // 30 second timeout
+        
+        const onReady = (data: any) => {
+          if (data.type === 'ready_to_receive') {
+            clearTimeout(timeout);
+            conn.off('data', onReady);
+            resolve();
+          }
+        };
+        
+        conn.on('data', onReady);
+      });
+      
+      await waitForReady;
+      
+      // Start transferring the file
+      await startPumping(conn, file, (progress, speed) => {
+        // Update file progress
+        setFilesQueue(prev => prev.map((qf, idx) => 
+          idx === index ? { ...qf, progress, speed } : qf
+        ));
+        
+        // Update overall progress
+        const totalSize = filesQueue.reduce((sum, qf) => sum + qf.file.size, 0);
+        const transferredSize = filesQueue.slice(0, index).reduce((sum, qf) => sum + qf.file.size, 0) + 
+                               (file.size * progress / 100);
+        const overallPercent = Math.round((transferredSize / totalSize) * 100);
+        setOverallProgress(overallPercent);
+      });
+      
+      // Mark file as sent
+      setFilesQueue(prev => prev.map((qf, idx) => 
+        idx === index ? { ...qf, status: 'sent', progress: 100 } : qf
+      ));
+      
+      // Move to next file after a short delay
+      setTimeout(() => {
+        if (index + 1 < filesQueue.length) {
+          setFilesQueue(prev => prev.map((qf, idx) => 
+            idx === index + 1 ? { ...qf, status: 'sending' } : qf
+          ));
+        }
+        processFileQueue(index + 1);
+      }, 500);
+      
+    } catch (error) {
+      console.error('Error sending file:', error);
+      setFilesQueue(prev => prev.map((qf, idx) => 
+        idx === index ? { ...qf, status: 'failed' } : qf
+      ));
+      setTransferSpeed(`Error: ${error.message}`);
+    }
+  };
 
-  // 🔥 AGGRESSIVE SPEED ENGINE (64KB Chunks + High Pressure Loop)
-  const startPumping = (conn: DataConnection, file: File, onComplete: () => void) => {
-    // BEST SETTINGS FOR MAX SPEED:
-    const CHUNK_SIZE = 64 * 1024; // 64KB रखें
-    const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
-    const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
-    const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
+  // 🔥 ULTRA-FAST TRANSFER ENGINE (Optimized for speed)
+  const startPumping = (
+    conn: DataConnection, 
+    file: File, 
+    onProgress: (progress: number, speed: string) => void
+  ): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      // OPTIMAL SETTINGS FOR MAX SPEED
+      const CHUNK_SIZE = 128 * 1024; // 128KB chunks
+      const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024; // 64MB buffer
+      const DRAIN_THRESHOLD = 8 * 1024 * 1024; // Resume at 8MB
+      const POLLING_INTERVAL = 1; // 1ms polling (ultra-aggressive)
+      
+      const fileReader = new FileReader();
+      let offset = 0;
+      let isCancelled = false;
+      let lastSpeedUpdate = Date.now();
+      let bytesSentThisSecond = 0;
 
-    const fileReader = new FileReader();
-    let offset = 0;
+      // Speed calculation function
+      const calculateSpeed = () => {
+        const now = Date.now();
+        const timeDiff = (now - lastSpeedUpdate) / 1000;
+        
+        if (timeDiff >= 1) {
+          const speedMBps = (bytesSentThisSecond / timeDiff) / (1024 * 1024);
+          bytesSentThisSecond = 0;
+          lastSpeedUpdate = now;
+          return speedMBps;
+        }
+        return null;
+      };
 
-    lastUpdateRef.current = Date.now();
-    lastBytesRef.current = 0;
+      // Wait for buffer to drain
+      const waitForDrain = () => {
+        if (isCancelled) return;
+        
+        if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
+          // Buffer has drained, resume sending
+          readNextChunk();
+        } else {
+          // Still full, check again shortly
+          setTimeout(waitForDrain, POLLING_INTERVAL);
+        }
+      };
 
-    // Ye function tab tak check karega jab tak buffer thoda khali nahi hota
-    const waitForDrain = () => {
-      if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
-        // Buffer 4MB तक खाली हो गया, वापस attack करो!
-        readNextChunk();
-      } else {
-        // अभी भी full है, 2ms बाद check करो
-        setTimeout(waitForDrain, POLLING_INTERVAL);
-      }
-    };
+      fileReader.onload = (e) => {
+        if (isCancelled) return;
+        
+        if (!e.target?.result) {
+          reject(new Error('File read error'));
+          return;
+        }
+        
+        const buffer = e.target.result as ArrayBuffer;
+        
+        try {
+          // Send the chunk
+          conn.send(buffer);
+          offset += buffer.byteLength;
+          bytesSentThisSecond += buffer.byteLength;
+          bytesSentRef.current += buffer.byteLength;
+          
+          // Calculate progress
+          const progress = Math.min(100, Math.round((offset / file.size) * 100));
+          
+          // Calculate speed
+          const speed = calculateSpeed();
+          if (speed !== null) {
+            const speedStr = `${speed.toFixed(1)} MB/s`;
+            onProgress(progress, speedStr);
+            
+            // Update transfer speed display
+            setTransferSpeed(speedStr);
+            
+            // Update stats
+            if (transferStats) {
+              setTransferStats(prev => prev ? {
+                ...prev,
+                speedHistory: [...prev.speedHistory, speed]
+              } : null);
+            }
+          }
+          
+          if (offset < file.size) {
+            // Check buffer status and decide whether to continue
+            if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
+              // Buffer has space, continue immediately
+              readNextChunk();
+            } else {
+              // Buffer is full, wait for drain
+              waitForDrain();
+            }
+          } else {
+            // File transfer complete
+            conn.send({ type: 'end' });
+            onProgress(100, 'Complete');
+            resolve();
+          }
+        } catch (err) {
+          console.error('Error sending chunk:', err);
+          
+          // Retry after short delay
+          if (!isCancelled) {
+            setTimeout(() => readNextChunk(), 100);
+          } else {
+            reject(err);
+          }
+        }
+      };
 
-    fileReader.onload = (e) => {
-      if (!e.target?.result) return;
-      const buffer = e.target.result as ArrayBuffer;
+      fileReader.onerror = () => {
+        if (!isCancelled) {
+          reject(new Error('File read error'));
+        }
+      };
 
-      try {
-        // Send data immediately
-        conn.send(buffer);
-        offset += buffer.byteLength;
+      const readNextChunk = () => {
+        if (isCancelled || offset >= file.size) return;
+        
+        const nextChunkSize = Math.min(CHUNK_SIZE, file.size - offset);
+        const slice = file.slice(offset, offset + nextChunkSize);
+        fileReader.readAsArrayBuffer(slice);
+      };
 
-        // UI Update Logic (Har 300ms pe update, taaki CPU free rahe)
-        const now = Date.now();
-        if (now - lastUpdateRef.current > 300) {
-          const progress = Math.min(100, Math.round((offset / file.size) * 100));
-          const bytesDiff = offset - lastBytesRef.current;
-          const timeDiff = (now - lastUpdateRef.current) / 1000;
-          if (timeDiff > 0) {
-            const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
-            setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-          }
-          setTransferProgress(progress);
-          lastUpdateRef.current = now;
-          lastBytesRef.current = offset;
-        }
+      // Start the transfer
+      readNextChunk();
 
-        if (offset < file.size) {
-          // 🔥 CRITICAL LOOP LOGIC 🔥
-          // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
-          if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
-            readNextChunk();
-          } else {
-            // Agar buffer full hai, to wait karo
-            waitForDrain();
-          }
-        } else {
-          conn.send({ type: 'end' });
-          setTransferProgress(100);
-          setTransferSpeed('Sent');
-          onComplete(); // Move to next file
-        }
-      } catch (err) {
-        console.error("Error sending, retrying...", err);
-        setTimeout(readNextChunk, 100);
-      }
-    };
+      // Cleanup function
+      return () => {
+        isCancelled = true;
+        fileReader.abort();
+      };
+    });
+  };
 
-    const readNextChunk = () => {
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
-      fileReader.readAsArrayBuffer(slice);
-    };
+  // Enhanced file saving with better error handling
+  const handleSaveFile = async () => {
+    const meta = receivedFileMetaRef.current || receivedFileMeta;
+    if (!meta) {
+      alert('Error: No file metadata available');
+      return;
+    }
+    
+    if (chunksRef.current.length === 0 && !writableStreamRef.current) {
+      alert('Error: No file data received');
+      return;
+    }
+    
+    setTransferSpeed('Saving to Disk...');
+    
+    try {
+      // If already saved via Motor mode
+      if (writableStreamRef.current || isFileSaved) {
+        setTransferSpeed('Already Saved via Motor ⚡');
+        return;
+      }
+      
+      // Create blob from chunks
+      const blob = new Blob(chunksRef.current, { type: meta.type });
+      
+      // Try to use File System Access API first
+      if ('showSaveFilePicker' in window) {
+        try {
+          const handle = await (window as any).showSaveFilePicker({
+            suggestedName: meta.name,
+            types: [{
+              description: 'File Transfer',
+              accept: { [meta.type]: [] }
+            }]
+          });
+          
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          
+          setTransferSpeed('Saved Successfully ✓');
+          setIsFileSaved(true);
+          return;
+        } catch (err) {
+          console.log('File System API failed, falling back to download');
+        }
+      }
+      
+      // Fallback: Use standard download
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      // Ensure filename has proper extension
+      let filename = meta.name;
+      if (!filename.includes('.')) {
+        const ext = meta.type.split('/')[1] || 'bin';
+        filename = `${meta.name}.${ext}`;
+      }
+      a.download = filename;
+      
+      // Trigger download
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      
+      // Clean up
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      
+      setTransferSpeed('Saved (Standard Download)');
+      setIsFileSaved(true);
+      
+    } catch (err) {
+      console.error('Save failed:', err);
+      setTransferSpeed('Save Failed');
+      alert('Failed to save file. Please try again.');
+    }
+  };
 
-    // Engine Start
-    readNextChunk();
-  };
+  // Reset transfer state
+  const resetTransfer = () => {
+    setFilesQueue([]);
+    setCurrentFileIndex(0);
+    setOverallProgress(0);
+    setTransferSpeed('0.0 MB/s');
+    setEstimatedTime('Calculating...');
+    setReceiverProgress(0);
+    setIsTransferComplete(false);
+    setIsMotorReady(false);
+    setIsFileSaved(false);
+    setReceivedFileMeta(null);
+    receivedFileMetaRef.current = null;
+    chunksRef.current = [];
+    bytesReceivedRef.current = 0;
+    bytesSentRef.current = 0;
+    speedHistoryRef.current = [];
+  };
 
-  // Save Function (Fallback for non-motor mode)
-  const handleSaveFile = async () => {
-    const meta = receivedFileMetaRef.current || receivedFileMeta;
-    if (!meta) {
-      alert("Error: File metadata missing. Please try sending again.");
-      return;
-    }
-    
-    if (chunksRef.current.length === 0 && !writableStreamRef.current) {
-      alert("Error: No file data received yet. Did the transfer finish?");
-      return;
-    }
-    
-    setTransferSpeed('Saving to Disk...');
-    
-    try {
-      if (writableStreamRef.current || isFileSaved) {
-        setTransferSpeed('Already Saved via Motor ⚡');
-        return;
-      }
-      
-      // Fallback: Use standard download
-      const blob = new Blob(chunksRef.current, { type: meta.type });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      
-      if (!meta.name.includes('.')) {
-        const ext = meta.type.split('/')[1] || 'bin';
-        a.download = `${meta.name}.${ext}`;
-      } else {
-        a.download = meta.name;
-      }
-      
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setTransferSpeed('Saved (Standard)');
-      setIsFileSaved(true);
-    } catch (err) {
-      console.error("Save failed:", err);
-      setTransferSpeed('Save Failed');
-    }
-  };
+  // Cancel ongoing transfer
+  const cancelTransfer = () => {
+    if (connRef.current) {
+      connRef.current.send({ type: 'transfer_cancelled' });
+    }
+    resetTransfer();
+    setConnectionStatus('Transfer Cancelled');
+  };
 
-  return (
-    <div className="min-h-screen bg-gray-900 text-white relative">
-      {/* Background Effects */}
-      <div className="absolute top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
-        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-blue-600/20 rounded-full blur-[120px]"></div>
-      </div>
+  // Copy Peer ID to clipboard
+  const copyPeerId = () => {
+    navigator.clipboard.writeText(myPeerId)
+      .then(() => {
+        alert('Peer ID copied to clipboard!');
+      })
+      .catch(err => {
+        console.error('Failed to copy:', err);
+      });
+  };
 
-      {/* Navigation */}
-      <nav className="relative z-10 border-b border-white/10 backdrop-blur-md bg-gray-900/50">
-        <div className="container mx-auto px-6 py-4 flex justify-between items-center">
-          <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
-            SecureShare
-          </span>
-          <div className="text-xs bg-gray-800 px-3 py-1 rounded-full border border-gray-700">
-            Status: <span className="text-green-400">{connectionStatus}</span>
-          </div>
-        </div>
-      </nav>
+  // Generate QR Code for Peer ID
+  const generateQRCode = () => {
+    // This would integrate with a QR code library
+    alert('QR Code generation would be implemented here');
+  };
 
-      {/* Main Content */}
-      <main className="relative z-10 container mx-auto px-4 py-12 flex flex-col items-center">
-        {/* Tab Switcher */}
-        <div className="bg-gray-800 p-1 rounded-xl inline-flex mb-8 shadow-lg border border-gray-700">
-          <button
-            onClick={() => setActiveTab(Tab.SEND)}
-            className={`px-8 py-3 rounded-lg ${activeTab === Tab.SEND ? 'bg-blue-600 text-white' : 'text-gray-400'}`}
-          >
-            I want to SEND
-          </button>
-          <button
-            onClick={() => setActiveTab(Tab.RECEIVE)}
-            className={`px-8 py-3 rounded-lg ${activeTab === Tab.RECEIVE ? 'bg-purple-600 text-white' : 'text-gray-400'}`}
-          >
-            I want to RECEIVE
-          </button>
-        </div>
+  // Calculate transfer statistics
+  const calculateStats = () => {
+    if (!transferStats || transferStats.endTime === 0) return null;
+    
+    const duration = (transferStats.endTime - transferStats.startTime) / 1000; // seconds
+    const totalMB = transferStats.totalBytes / (1024 * 1024);
+    const avgSpeed = totalMB / duration;
+    
+    return {
+      duration: `${duration.toFixed(1)}s`,
+      totalSize: `${(totalMB / 1024).toFixed(2)} GB`,
+      avgSpeed: `${avgSpeed.toFixed(1)} MB/s`,
+      maxSpeed: `${maxSpeed.toFixed(1)} MB/s`
+    };
+  };
 
-        {/* Device ID Display */}
-        <div className="mb-8 text-center">
-          <p className="text-gray-400 text-sm mb-2">Your Device ID (Share this)</p>
-          <div className="text-4xl font-mono font-bold text-yellow-400 tracking-widest bg-black/30 px-6 py-2 rounded-xl border border-yellow-400/30 select-all">
-            {myPeerId || '...'}
-          </div>
-        </div>
+  const stats = calculateStats();
 
-        {/* Main Panel */}
-        <div className="w-full max-w-2xl bg-gray-800/50 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl">
-          {/* SEND Tab (MULTIPLE FILES SUPPORT) */}
-          {activeTab === Tab.SEND && (
-            <div className="space-y-6">
-              {/* File Select - MULTIPLE FILES ENABLED */}
-              <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center relative hover:border-blue-500">
-                <input
-                  type="file"
-                  multiple
-                  onChange={handleFileSelect}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                />
-                <div className="space-y-2">
-                  <p className="text-xl font-medium">
-                    {filesQueue.length > 0 
-                      ? `${filesQueue.length} files selected` 
-                      : "Select Files to Send"}
-                  </p>
-                  {filesQueue.length > 0 && (
-                    <div className="text-xs text-gray-400 max-h-20 overflow-y-auto">
-                      {filesQueue.map((f, i) => (
-                        <div key={i} className={i === currentFileIndex ? "text-blue-400 font-bold" : ""}>
-                          {i + 1}. {f.name} ({(f.size / (1024 * 1024)).toFixed(2)} MB)
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 to-black text-white relative overflow-x-hidden">
+      {/* Animated Background */}
+      <div className="absolute top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
+        <div className="absolute top-[-20%] left-[-10%] w-[60%] h-[60%] bg-blue-600/10 rounded-full blur-[140px] animate-pulse"></div>
+        <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-purple-600/10 rounded-full blur-[120px]"></div>
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[80%] h-[80%] bg-gradient-radial from-cyan-500/5 to-transparent"></div>
+      </div>
 
-              {/* Receiver ID Input */}
-              <div className="flex gap-2 items-center bg-gray-900 p-4 rounded-xl border border-gray-700">
-                <input
-                  type="text"
-                  placeholder="Enter Receiver's ID here"
-                  value={remotePeerId}
-                  onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
-                  className="bg-transparent flex-1 outline-none text-white font-mono uppercase"
-                />
-                <button
-                  onClick={connectToPeer}
-                  className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm"
-                >
-                  Connect
-                </button>
-              </div>
+      {/* Navigation */}
+      <nav className="relative z-10 border-b border-white/10 backdrop-blur-xl bg-gray-900/70 sticky top-0">
+        <div className="container mx-auto px-4 sm:px-6 py-3 flex flex-col sm:flex-row justify-between items-center gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-xl flex items-center justify-center font-bold text-lg">
+              SS
+            </div>
+            <span className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white via-blue-300 to-cyan-300">
+              SecureShare Pro
+            </span>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            <div className="hidden sm:flex flex-col items-end">
+              <div className="text-xs text-gray-400">Connection Status</div>
+              <div className={`text-sm font-semibold ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
+                {connectionStatus}
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
+              <button 
+                onClick={() => setShowTransferHistory(!showTransferHistory)}
+                className="text-xs bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg border border-gray-700 transition-all"
+              >
+                📊 Stats
+              </button>
+            </div>
+          </div>
+        </div>
+      </nav>
 
-              {/* Progress Bar */}
-              {transferProgress > 0 && (
-                <div className="w-full space-y-2">
-                  <div className="flex justify-between text-xs text-gray-400 px-1">
-                    <span>Sending File {currentFileIndex + 1} of {filesQueue.length}</span>
-                    <span className="text-green-400 font-mono font-bold">{transferSpeed}</span>
-                  </div>
-                  <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden relative">
-                    <div
-                      className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-200"
-                      style={{ width: `${transferProgress}%` }}
-                    ></div>
-                    <p className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white drop-shadow-md">
-                      {transferProgress}%
-                    </p>
-                  </div>
-                </div>
-              )}
+      {/* Transfer History Panel */}
+      {showTransferHistory && (
+        <div className="relative z-20 container mx-auto px-4 mt-6 animate-slideDown">
+          <div className="bg-gray-800/80 backdrop-blur-xl border border-white/10 rounded-2xl p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold">Transfer Statistics</h3>
+              <button 
+                onClick={() => setShowTransferHistory(false)}
+                className="text-gray-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-gray-900/50 p-4 rounded-xl">
+                <div className="text-sm text-gray-400">Total Transferred</div>
+                <div className="text-2xl font-bold text-cyan-300">
+                  {(totalTransferred / (1024 * 1024 * 1024)).toFixed(2)} GB
+                </div>
+              </div>
+              
+              <div className="bg-gray-900/50 p-4 rounded-xl">
+                <div className="text-sm text-gray-400">Files Transferred</div>
+                <div className="text-2xl font-bold text-green-300">
+                  {filesTransferred}
+                </div>
+              </div>
+              
+              <div className="bg-gray-900/50 p-4 rounded-xl">
+                <div className="text-sm text-gray-400">Max Speed</div>
+                <div className="text-2xl font-bold text-yellow-300">
+                  {maxSpeed.toFixed(1)} MB/s
+                </div>
+              </div>
+            </div>
+            
+            {stats && (
+              <div className="mt-6 pt-4 border-t border-white/10">
+                <h4 className="font-semibold mb-2">Last Transfer</h4>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                  <div>
+                    <div className="text-gray-400">Duration</div>
+                    <div className="font-mono">{stats.duration}</div>
+                  </div>
+                  <div>
+                    <div className="text-gray-400">Size</div>
+                    <div className="font-mono">{stats.totalSize}</div>
+                  </div>
+                  <div>
+                    <div className="text-gray-400">Avg Speed</div>
+                    <div className="font-mono">{stats.avgSpeed}</div>
+                  </div>
+                  <div>
+                    <div className="text-gray-400">Max Speed</div>
+                    <div className="font-mono">{stats.maxSpeed}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
-              {/* Send All Files Button */}
-              <button
-                onClick={sendAllFiles}
-                disabled={filesQueue.length === 0 || connectionStatus.includes('Initializing')}
-                className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-xl font-bold shadow-lg disabled:opacity-50"
-              >
-                Send All Files 🚀
-              </button>
-            </div>
-          )}
+      {/* Main Content */}
+      <main className="relative z-10 container mx-auto px-4 py-8 flex flex-col items-center">
+        {/* Tab Switcher */}
+        <div className="bg-gray-800/80 backdrop-blur-xl p-1 rounded-2xl inline-flex mb-8 shadow-2xl border border-white/10">
+          <button
+            onClick={() => {
+              setActiveTab(Tab.SEND);
+              resetTransfer();
+            }}
+            className={`px-8 py-3 rounded-xl text-sm font-semibold transition-all ${activeTab === Tab.SEND ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-gray-700/50'}`}
+          >
+            <span className="flex items-center gap-2">
+              <span>📤</span>
+              <span>SEND Files</span>
+            </span>
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab(Tab.RECEIVE);
+              resetTransfer();
+            }}
+            className={`px-8 py-3 rounded-xl text-sm font-semibold transition-all ${activeTab === Tab.RECEIVE ? 'bg-gradient-to-r from-purple-600 to-pink-500 text-white shadow-lg' : 'text-gray-400 hover:text-white hover:bg-gray-700/50'}`}
+          >
+            <span className="flex items-center gap-2">
+              <span>📥</span>
+              <span>RECEIVE Files</span>
+            </span>
+          </button>
+        </div>
 
-          {/* RECEIVE Tab (WITH MOTOR MODE) */}
-          {activeTab === Tab.RECEIVE && (
-            <div className="space-y-6 text-center">
-              <h2 className="text-2xl font-bold">Ready to Receive</h2>
-              <p className="text-gray-400">
-                Your ID: <span className="text-yellow-400 font-mono font-bold text-lg">{myPeerId}</span>
-              </p>
+        {/* Device ID Display with Actions */}
+        <div className="w-full max-w-2xl mb-8">
+          <div className="text-center mb-4">
+            <p className="text-gray-400 text-sm mb-2">Your Unique Device ID</p>
+            <div className="relative group">
+              <div className="text-4xl font-mono font-bold bg-gradient-to-r from-yellow-300 via-amber-300 to-yellow-400 bg-clip-text text-transparent tracking-widest bg-black/30 px-6 py-3 rounded-2xl border border-yellow-400/30 select-all">
+                {myPeerId || 'GENERATING...'}
+              </div>
+              <div className="absolute -top-2 -right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  onClick={copyPeerId}
+                  className="w-8 h-8 bg-gray-800 hover:bg-gray-700 rounded-full flex items-center justify-center text-xs border border-gray-700"
+                  title="Copy ID"
+                >
+                  ⎘
+                </button>
+                <button
+                  onClick={generateQRCode}
+                  className="w-8 h-8 bg-gray-800 hover:bg-gray-700 rounded-full flex items-center justify-center text-xs border border-gray-700"
+                  title="Show QR Code"
+                >
+                  ⚈
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">Share this ID with others to connect</p>
+          </div>
+        </div>
 
-              {receivedFileMeta && (
-                <div className="bg-gray-700/50 p-4 rounded-xl mt-4">
-                  <p className="font-bold text-lg text-blue-300">Receiving: {receivedFileMeta.name}</p>
-                  <p className="text-sm text-gray-400">
-                    {(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB
-                  </p>
+        {/* Main Panel */}
+        <div className="w-full max-w-4xl bg-gray-800/40 backdrop-blur-xl border border-white/10 rounded-3xl p-6 md:p-8 shadow-2xl mb-12">
+          {/* SEND Tab */}
+          {activeTab === Tab.SEND && (
+            <div className="space-y-6 animate-fadeIn">
+              {/* File Selection Area */}
+              <div className="border-3 border-dashed border-gray-600 hover:border-blue-500 rounded-2xl p-8 text-center transition-all duration-300 relative group">
+                <input
+                  type="file"
+                  multiple
+                  onChange={handleFileSelect}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                  accept="*/*"
+                  title=""
+                />
+                <div className="space-y-4">
+                  <div className="w-16 h-16 mx-auto bg-gradient-to-br from-blue-500/20 to-cyan-500/20 rounded-2xl flex items-center justify-center text-3xl">
+                    📁
+                  </div>
+                  <div>
+                    <p className="text-xl font-medium mb-1">
+                      {filesQueue.length > 0 
+                        ? `${filesQueue.length} files selected` 
+                        : "Click or drag files here"}
+                    </p>
+                    <p className="text-sm text-gray-400">
+                      {filesQueue.length > 0 
+                        ? `${(filesQueue.reduce((sum, qf) => sum + qf.file.size, 0) / (1024 * 1024 * 1024)).toFixed(2)} GB total`
+                        : "Supports multiple files, up to 2GB each"}
+                    </p>
+                  </div>
+                  
+                  {filesQueue.length > 0 && (
+                    <div className="max-h-48 overflow-y-auto rounded-lg bg-gray-900/50 p-4 border border-gray-700">
+                      <div className="space-y-2">
+                        {filesQueue.map((qf, i) => (
+                          <div 
+                            key={i} 
+                            className={`flex items-center justify-between p-2 rounded-lg ${i === currentFileIndex ? 'bg-blue-900/30 border border-blue-700/50' : 'hover:bg-gray-800/50'}`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm ${
+                                qf.status === 'sent' ? 'bg-green-900/50' :
+                                qf.status === 'sending' ? 'bg-blue-900/50 animate-pulse' :
+                                qf.status === 'failed' ? 'bg-red-900/50' :
+                                'bg-gray-800'
+                              }`}>
+                                {qf.status === 'sent' ? '✓' :
+                                 qf.status === 'sending' ? '⏳' :
+                                 qf.status === 'failed' ? '✗' : i + 1}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium truncate">{qf.file.name}</p>
+                                <p className="text-xs text-gray-400">
+                                  {(qf.file.size / (1024 * 1024)).toFixed(2)} MB • {qf.speed}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <div className="w-24 bg-gray-700 rounded-full h-2 overflow-hidden">
+                                <div 
+                                  className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full transition-all duration-300"
+                                  style={{ width: `${qf.progress}%` }}
+                                ></div>
+                              </div>
+                              <span className="text-xs font-bold w-8 text-right">{qf.progress}%</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
 
-                  <div className="mt-4 space-y-2">
-                    <div className="flex justify-between text-xs text-gray-400 px-1">
-                      <span>Progress</span>
-                      <span className={`font-mono font-bold ${transferSpeed.includes('⚡') ? 'text-cyan-400 animate-pulse' : 'text-green-400'}`}>
-                        {transferSpeed}
-                      </span>
-                    </div>
-                    <div className="w-full bg-gray-600 rounded-full h-3 overflow-hidden">
-                      <div
-                        className="bg-green-500 h-full transition-all duration-200 shadow-[0_0_10px_rgba(34,197,94,0.5)]"
-                        style={{ width: `${transferProgress}%` }}
-                      ></div>
-                    </div>
-                    <p className="text-xs text-right text-gray-300 font-bold">{transferProgress}%</p>
-                  </div>
+              {/* Connection Input */}
+              <div className="bg-gradient-to-r from-gray-900 to-black p-4 rounded-2xl border border-gray-700">
+                <p className="text-sm text-gray-400 mb-3">Connect to Receiver</p>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      placeholder="Enter Receiver's ID (e.g., ABCD)"
+                      value={remotePeerId}
+                      onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
+                      className="w-full bg-gray-800 border border-gray-600 focus:border-blue-500 rounded-xl px-4 py-3 outline-none transition-all font-mono uppercase"
+                      maxLength={10}
+                    />
+                    <div className="absolute right-3 top-1/2 transform -translate-y-1/2 text-xs text-gray-500">
+                      {remotePeerId.length}/10
+                    </div>
+                  </div>
+                  <button
+                    onClick={connectToPeer}
+                    disabled={!remotePeerId.trim()}
+                    className="bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 rounded-xl font-bold shadow-lg transition-all min-w-[120px]"
+                  >
+                    {isConnected ? 'Connected ✓' : 'Connect'}
+                  </button>
+                </div>
+              </div>
 
-                  {/* Motor Confirmation Button */}
-                  {!isMotorReady && !isTransferComplete && (
-                    <button
-                      onClick={prepareMotor}
-                      className="mt-4 w-full bg-green-600 hover:bg-green-500 px-4 py-3 rounded-xl font-bold shadow-lg flex items-center justify-center gap-2"
-                    >
-                      <span>Confirm & Start Receiving</span>
-                      <span className="text-lg">⚡</span>
-                    </button>
-                  )}
+              {/* Progress Section */}
+              {(overallProgress > 0 || filesQueue.length > 0) && (
+                <div className="space-y-4 animate-slideUp">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="font-semibold">
+                        {overallProgress < 100 ? 'Transferring...' : 'Complete!'}
+                      </p>
+                      <p className="text-sm text-gray-400">
+                        File {currentFileIndex + 1} of {filesQueue.length} • ETA: {estimatedTime}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-2xl font-bold text-green-400 font-mono">{transferSpeed}</p>
+                      <p className="text-xs text-gray-400">Current Speed</p>
+                    </div>
+                  </div>
+                  
+                  {/* Overall Progress */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-400">Overall Progress</span>
+                      <span className="font-bold">{overallProgress}%</span>
+                    </div>
+                    <div className="w-full bg-gray-700 rounded-full h-4 overflow-hidden relative">
+                      <div
+                        className="bg-gradient-to-r from-blue-500 via-cyan-400 to-green-400 h-full transition-all duration-300 shadow-[0_0_20px_rgba(59,130,246,0.5)]"
+                        style={{ width: `${overallProgress}%` }}
+                      ></div>
+                      {overallProgress > 0 && overallProgress < 100 && (
+                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer"></div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Action Buttons */}
+                  <div className="flex gap-3 pt-2">
+                    <button
+                      onClick={sendAllFiles}
+                      disabled={filesQueue.length === 0 || !isConnected || overallProgress > 0}
+                      className="flex-1 bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-500 hover:to-emerald-400 disabled:opacity-50 py-4 rounded-xl font-bold shadow-xl text-lg transition-all flex items-center justify-center gap-3"
+                    >
+                      <span>🚀</span>
+                      <span>LAUNCH TRANSFER</span>
+                    </button>
+                    
+                    {overallProgress > 0 && overallProgress < 100 && (
+                      <button
+                        onClick={cancelTransfer}
+                        className="px-6 bg-gradient-to-r from-red-600 to-pink-500 hover:from-red-500 hover:to-pink-400 py-4 rounded-xl font-bold shadow-lg transition-all"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
-                  {/* Fallback Save Button */}
-                  {isTransferComplete && !writableStreamRef.current && !isFileSaved && (
-                    <button
-                      onClick={handleSaveFile}
-                      className="mt-4 block w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-xl font-bold shadow-lg"
-                    >
-                      Save File Now 💾
-                    </button>
-                  )}
+          {/* RECEIVE Tab */}
+          {activeTab === Tab.RECEIVE && (
+            <div className="space-y-6 animate-fadeIn">
+              <div className="text-center">
+                <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-300 to-pink-300">
+                  Ready to Receive Files
+                </h2>
+                <p className="text-gray-400 mt-2">
+                  Share your ID: <span className="text-yellow-300 font-mono font-bold text-lg">{myPeerId}</span>
+                </p>
+                <p className="text-sm text-gray-500 mt-1">
+                  Others can send files by connecting to this ID
+                </p>
+              </div>
 
-                  {/* Already Saved Message */}
-                  {isTransferComplete && (writableStreamRef.current || isFileSaved) && (
-                    <div className="mt-4 p-3 bg-cyan-900/30 border border-cyan-700 rounded-xl">
-                      <p className="text-cyan-300 font-bold">✓ File saved directly to disk!</p>
-                      <p className="text-xs text-cyan-400 mt-1">Check your downloads folder</p>
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* Transfer Status */}
+              {receivedFileMeta ? (
+                <div className="bg-gradient-to-br from-gray-900 to-black p-6 rounded-2xl border border-white/10 shadow-2xl">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <p className="font-bold text-lg text-blue-300 flex items-center gap-2">
+                        <span>📄</span>
+                        {receivedFileMeta.name}
+                      </p>
+                      <p className="text-sm text-gray-400">
+                        {(receivedFileMeta.size / (1024 * 1024)).toFixed(2)} MB • {receivedFileMeta.type}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className={`text-xl font-bold font-mono ${transferSpeed.includes('⚡') ? 'text-cyan-400 animate-pulse' : 'text-green-400'}`}>
+                        {transferSpeed}
+                      </p>
+                      <p className="text-xs text-gray-400">ETA: {estimatedTime}</p>
+                    </div>
+                  </div>
 
-              {!receivedFileMeta && (
-                <div className="text-gray-500 text-sm mt-4">
-                  Waiting for sender to connect...
-                  <p className="text-xs mt-2">Share your ID above with the sender</p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </main>
+                  {/* Progress Visualization */}
+                  <div className="space-y-3">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-400">Receiving Progress</span>
+                      <span className="font-bold">{receiverProgress}%</span>
+                    </div>
+                    <div className="w-full bg-gray-700 rounded-full h-5 overflow-hidden relative">
+                      <div
+                        className="bg-gradient-to-r from-green-500 via-emerald-400 to-teal-400 h-full transition-all duration-300 shadow-[0_0_20px_rgba(34,197,94,0.3)]"
+                        style={{ width: `${receiverProgress}%` }}
+                      ></div>
+                      {receiverProgress > 0 && receiverProgress < 100 && (
+                        <div className="absolute top-0 left-0 right-0 bottom-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer"></div>
+                      )}
+                    </div>
+                    
+                    {/* Progress Details */}
+                    <div className="grid grid-cols-3 gap-4 text-center pt-4">
+                      <div className="bg-gray-800/50 p-3 rounded-xl">
+                        <div className="text-2xl font-bold text-blue-300">
+                          {receiverProgress}%
+                        </div>
+                        <div className="text-xs text-gray-400">Progress</div>
+                      </div>
+                      <div className="bg-gray-800/50 p-3 rounded-xl">
+                        <div className="text-2xl font-bold text-cyan-300">
+                          {(bytesReceivedRef.current / (1024 * 1024)).toFixed(2)}
+                        </div>
+                        <div className="text-xs text-gray-400">MB Received</div>
+                      </div>
+                      <div className="bg-gray-800/50 p-3 rounded-xl">
+                        <div className="text-2xl font-bold text-yellow-300">
+                          {maxSpeed.toFixed(1)}
+                        </div>
+                        <div className="text-xs text-gray-400">Max MB/s</div>
+                      </div>
+                    </div>
+                  </div>
 
-      {/* Chat Widget */}
-      <div className="fixed bottom-6 right-6 z-50">
-        {!isChatOpen && (
-          <button
-            onClick={() => setIsChatOpen(true)}
-            className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white"
-          >
-            💬
-          </button>
-        )}
+                  {/* Action Buttons */}
+                  <div className="mt-6 space-y-3">
+                    {!isMotorReady && !isTransferComplete && (
+                      <button
+                        onClick={prepareMotor}
+                        className="w-full bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-500 hover:to-emerald-400 px-4 py-4 rounded-xl font-bold shadow-xl flex items-center justify-center gap-3 text-lg transition-all"
+                      >
+                        <span className="text-2xl">⚡</span>
+                        <span>ENABLE MOTOR MODE (Direct Save)</span>
+                      </button>
+                    )}
 
-        {isChatOpen && (
-          <div className="w-[350px] h-[500px] flex flex-col relative">
-            <button
-              onClick={() => setIsChatOpen(false)}
-              className="absolute -top-3 -right-3 w-8 h-8 bg-gray-700 text-white rounded-full flex items-center justify-center shadow-lg z-10"
-            >
-              X
-            </button>
-            <ChatBot />
-          </div>
-        )}
-      </div>
-    </div>
-  );
+                    {isTransferComplete && !writableStreamRef.current && !isFileSaved && (
+                      <div className="space-y-3">
+                        <button
+                          onClick={handleSaveFile}
+                          className="w-full bg-gradient-to-r from-purple-600 to-pink-500 hover:from-purple-500 hover:to-pink-400 py-4 rounded-xl font-bold shadow-xl text-lg transition-all flex items-center justify-center gap-3"
+                        >
+                          <span>💾</span>
+                          <span>SAVE FILE TO DEVICE</span>
+                        </button>
+                        <p className="text-xs text-gray-400 text-center">
+                          The file is temporarily stored in memory. Save it permanently.
+                        </p>
+                      </div>
+                    )}
+
+                    {isTransferComplete && (writableStreamRef.current || isFileSaved) && (
+                      <div className="p-4 bg-gradient-to-r from-cyan-900/30 to-teal-900/30 border border-cyan-700 rounded-2xl text-center">
+                        <div className="text-4xl mb-2">🎉</div>
+                        <p className="text-cyan-300 font-bold text-lg">File Successfully Saved!</p>
+                        <p className="text-sm text-cyan-400 mt-1">
+                          {writableStreamRef.current ? 'Saved directly to disk via Motor Mode' : 'Downloaded to your device'}
+                        </p>
+                        <div className="mt-4 flex gap-3 justify-center">
+                          <button
+                            onClick={() => {
+                              if (receivedFiles.length > 0) {
+                                const latestFile = receivedFiles[receivedFiles.length - 1];
+                                window.open(latestFile.url, '_blank');
+                              }
+                            }}
+                            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm"
+                          >
+                            Open File
+                          </button>
+                          <button
+                            onClick={resetTransfer}
+                            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm"
+                          >
+                            Ready for Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Waiting State */
+                <div className="text-center py-12">
+                  <div className="w-24 h-24 mx-auto mb-6 bg-gradient-to-br from-purple-500/10 to-pink-500/10 rounded-3xl flex items-center justify-center text-5xl animate-pulse">
+                    ⏳
+                  </div>
+                  <h3 className="text-xl font-semibold text-gray-300">Waiting for Connection</h3>
+                  <p className="text-gray-500 mt-2 max-w-md mx-auto">
+                    Share your Device ID with the sender. Once they connect, the file transfer will begin automatically.
+                  </p>
+                  <div className="mt-6 inline-flex items-center gap-2 text-sm text-gray-400">
+                    <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span>Ready to receive</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Received Files History */}
+              {receivedFiles.length > 0 && (
+                <div className="mt-8 pt-6 border-t border-white/10">
+                  <h4 className="font-semibold mb-4 flex items-center gap-2">
+                    <span>📚</span>
+                    <span>Recently Received Files</span>
+                  </h4>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {receivedFiles.slice().reverse().map((file, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-xl hover:bg-gray-800/50 transition-colors">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-10 h-10 bg-gradient-to-br from-blue-500/20 to-cyan-500/20 rounded-lg flex items-center justify-center">
+                            📄
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium truncate">{file.meta.name}</p>
+                            <p className="text-xs text-gray-400">
+                              {(file.meta.size / (1024 * 1024)).toFixed(2)} MB
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => window.open(file.url, '_blank')}
+                          className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-xs transition-colors"
+                        >
+                          Open
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Features Grid */}
+        <div className="w-full max-w-4xl mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-gray-800/30 backdrop-blur-sm p-5 rounded-2xl border border-white/5">
+            <div className="text-3xl mb-3">⚡</div>
+            <h4 className="font-bold mb-2">Ultra-Fast Transfer</h4>
+            <p className="text-sm text-gray-400">Optimized engine with 128KB chunks for maximum speed</p>
+          </div>
+          <div className="bg-gray-800/30 backdrop-blur-sm p-5 rounded-2xl border border-white/5">
+            <div className="text-3xl mb-3">🔒</div>
+            <h4 className="font-bold mb-2">Secure Connection</h4>
+            <p className="text-sm text-gray-400">Peer-to-peer encrypted transfer, no servers involved</p>
+          </div>
+          <div className="bg-gray-800/30 backdrop-blur-sm p-5 rounded-2xl border border-white/5">
+            <div className="text-3xl mb-3">💾</div>
+            <h4 className="font-bold mb-2">Motor Mode</h4>
+            <p className="text-sm text-gray-400">Direct disk streaming to save memory</p>
+          </div>
+        </div>
+      </main>
+
+      {/* Chat Widget */}
+      <div className="fixed bottom-6 right-6 z-50">
+        {!isChatOpen && (
+          <button
+            onClick={() => setIsChatOpen(true)}
+            className="w-16 h-16 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-2xl shadow-2xl flex items-center justify-center text-white text-2xl hover:scale-105 transition-transform hover:shadow-[0_0_30px_rgba(59,130,246,0.5)]"
+          >
+            💬
+          </button>
+        )}
+
+        {isChatOpen && (
+          <div className="w-[380px] h-[600px] flex flex-col relative animate-slideUp">
+            <button
+              onClick={() => setIsChatOpen(false)}
+              className="absolute -top-2 -right-2 w-8 h-8 bg-gray-800 hover:bg-gray-700 text-white rounded-full flex items-center justify-center shadow-lg z-10 border border-gray-700 transition-colors"
+            >
+              ✕
+            </button>
+            <ChatBot />
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <footer className="relative z-10 border-t border-white/10 mt-12 py-6">
+        <div className="container mx-auto px-4 text-center">
+          <p className="text-gray-500 text-sm">
+            SecureShare Pro • P2P File Transfer • v2.0 • {new Date().getFullYear()}
+          </p>
+          <p className="text-gray-600 text-xs mt-2">
+            All transfers are direct between devices. No files are stored on our servers.
+          </p>
+        </div>
+      </footer>
+
+      {/* Custom CSS for animations */}
+      <style jsx>{`
+        @keyframes shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+        
+        @keyframes slideUp {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes slideDown {
+          from { opacity: 0; transform: translateY(-20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        
+        .animate-shimmer {
+          animation: shimmer 2s infinite;
+        }
+        
+        .animate-slideUp {
+          animation: slideUp 0.3s ease-out;
+        }
+        
+        .animate-slideDown {
+          animation: slideDown 0.3s ease-out;
+        }
+        
+        .animate-fadeIn {
+          animation: fadeIn 0.5s ease-out;
+        }
+        
+        .bg-gradient-radial {
+          background-image: radial-gradient(circle, var(--tw-gradient-stops));
+        }
+      `}</style>
+    </div>
+  );
 };
 
 export default App;
+
+code sahi hai na
