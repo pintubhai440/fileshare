@@ -28,8 +28,6 @@ const App: React.FC = () => {
   const [receivedFileMeta, setReceivedFileMeta] = useState<FileMeta | null>(null);
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
-  // 👇 NEW STATE: To track if file is safely on disk
-  const [isFileSaved, setIsFileSaved] = useState(false);
   
   // High Performance Refs
   const chunksRef = useRef<ArrayBuffer[]>([]);
@@ -106,7 +104,6 @@ const App: React.FC = () => {
         
         setIsTransferComplete(false);
         setIsMotorReady(false);
-        setIsFileSaved(false); // Reset saved status
         setTransferProgress(0);
         setTransferSpeed('Starting...');
         
@@ -120,7 +117,6 @@ const App: React.FC = () => {
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
-          setIsFileSaved(true); // ✅ Fix: Mark as saved so button hides
         }
         setTransferProgress(100);
         setTransferSpeed('Completed');
@@ -137,24 +133,23 @@ const App: React.FC = () => {
     });
   };
 
-  // 🔥 MOTOR - Prepare file system for streaming (UPDATED FIX)
+  // 🔥 MOTOR - Prepare file system for streaming (UPDATED)
   const prepareMotor = async () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
-    
-    const meta = receivedFileMetaRef.current;
 
-    // Check if browser supports File System Access API
+    const meta = receivedFileMetaRef.current; // शॉर्टकट बना लिया
+
     // @ts-ignore
     if (window.showSaveFilePicker) {
       try {
         const handle = await window.showSaveFilePicker({
-          suggestedName: meta.name,
+          suggestedName: meta.name, // यह असली नाम यूज करेगा (जैसे photo.jpg)
           types: [{
             description: 'File Transfer',
             accept: {
-              [meta.type]: [] // ✅ Fix: Explicitly tell Windows the file type
+              [meta.type]: [] // 👈 जादू यहाँ है: यह कंप्यूटर को सही फाइल टाइप बताएगा
             }
-          }]
+          }],
         });
         writableStreamRef.current = await handle.createWritable();
         setIsMotorReady(true);
@@ -295,56 +290,55 @@ const App: React.FC = () => {
     readNextChunk();
   };
 
-  // --- SAVE FUNCTION (Fallback for non-motor mode) ---
+  // --- SAVE FUNCTION (Updated) ---
   const handleSaveFile = async () => {
-      const meta = receivedFileMetaRef.current || receivedFileMeta;
+    const meta = receivedFileMetaRef.current || receivedFileMeta;
 
-      if (!meta) {
-          alert("Error: File metadata missing. Please try sending again.");
-          return;
-      }
-      
-      if (chunksRef.current.length === 0 && !writableStreamRef.current) {
-          alert("Error: No file data received yet. Did the transfer finish?");
-          return;
-      }
+    if (!meta) {
+        alert("Error: File metadata missing.");
+        return;
+    }
+    
+    if (chunksRef.current.length === 0 && !writableStreamRef.current) {
+        alert("Error: No file data received yet. Did the transfer finish?");
+        return;
+    }
 
-      setTransferSpeed('Saving to Disk...');
+    setTransferSpeed('Saving to Disk...');
 
-      try {
-          // If we already used motor, file is already saved
-          if (writableStreamRef.current || isFileSaved) {
-              setTransferSpeed('Already Saved via Motor ⚡');
-              return;
-          }
+    try {
+        // If we already used motor, file is already saved
+        if (writableStreamRef.current) {
+            setTransferSpeed('Already Saved via Motor ⚡');
+            return;
+        }
 
-          // Fallback: Use standard download
-          const blob = new Blob(chunksRef.current, { type: meta.type });
-          const url = URL.createObjectURL(blob);
-          
-          const a = document.createElement('a');
-          a.href = url;
-          
-          // ✅ Fix: Add extension if missing (Fixes White Icon Bug)
-          if (!meta.name.includes('.')) {
-              const ext = meta.type.split('/')[1] || 'bin'; 
-              a.download = `${meta.name}.${ext}`;
-          } else {
-              a.download = meta.name;
-          }
-
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-          setTransferSpeed('Saved (Standard)');
-          setIsFileSaved(true);
-          
-      } catch (err) {
-          console.error("Save failed:", err);
-          setTransferSpeed('Save Failed');
-      }
+        // Fallback: Use standard download
+        const blob = new Blob(chunksRef.current, { type: meta.type });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        
+        // 👇 अगर नाम में डॉट (.) नहीं है, तो हम जबरदस्ती टाइप जोड़ देंगे
+        let fileName = meta.name;
+        if (!fileName.includes('.')) {
+            const ext = meta.type.split('/')[1] || 'bin'; // जैसे image/png -> png
+            fileName = `${fileName}.${ext}`;
+        }
+        
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setTransferSpeed('Saved (Standard)');
+        
+    } catch (err) {
+        console.error("Save failed:", err);
+        setTransferSpeed('Save Failed');
+    }
   };
 
   return (
@@ -431,6 +425,7 @@ const App: React.FC = () => {
                  <div className="bg-gray-700/50 p-4 rounded-xl mt-4">
                    <p className="font-bold text-lg text-blue-300">Receiving: {receivedFileMeta.name}</p>
                    <p className="text-sm text-gray-400">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB</p>
+                   <p className="text-xs text-gray-400">Type: {receivedFileMeta.type}</p>
                    
                    <div className="mt-4 space-y-2">
                        <div className="flex justify-between text-xs text-gray-400 px-1">
@@ -456,8 +451,8 @@ const App: React.FC = () => {
                      </button>
                    )}
 
-                   {/* Fallback Save Button - Only show if NOT saved */}
-                   {isTransferComplete && !writableStreamRef.current && !isFileSaved && (
+                   {/* Fallback Save Button (for non-motor or if motor not supported) */}
+                   {isTransferComplete && !writableStreamRef.current && (
                      <button 
                        onClick={handleSaveFile}
                        className="mt-4 block w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-xl font-bold shadow-lg"
@@ -466,11 +461,11 @@ const App: React.FC = () => {
                      </button>
                    )}
 
-                   {/* Already Saved Message */}
-                   {isTransferComplete && (writableStreamRef.current || isFileSaved) && (
+                   {/* Already Saved with Motor */}
+                   {isTransferComplete && writableStreamRef.current && (
                      <div className="mt-4 p-3 bg-cyan-900/30 border border-cyan-700 rounded-xl">
-                       <p className="text-cyan-300 font-bold">✓ File saved directly to disk!</p>
-                       <p className="text-xs text-cyan-400 mt-1">Check your downloads folder</p>
+                       <p className="text-cyan-300 font-bold">✓ File already saved with Motor!</p>
+                       <p className="text-xs text-cyan-400 mt-1">No need to save again</p>
                      </div>
                    )}
                  </div>
@@ -492,7 +487,7 @@ const App: React.FC = () => {
        <div className="fixed bottom-6 right-6 z-50">
         {!isChatOpen && (
           <button onClick={() => setIsChatOpen(true)} className="w-14 h-14 bg-gradient-to-r from-blue-600 to-cyan-500 rounded-full shadow-2xl flex items-center justify-center text-white">
-              💬
+             💬
           </button>
         )}
         {isChatOpen && (
