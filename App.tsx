@@ -58,8 +58,22 @@ const App: React.FC = () => {
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
 
-  // ✅ UPDATED PEERJS INITIALIZATION WITH NEW TURN SERVERS
+  // ✅ UPDATED: Screen Wake Lock aur PeerJS Initialization
   useEffect(() => {
+    // 🔥 NEW: Screen Wake Lock (Screen band hone se rokega)
+    const keepScreenAwake = async () => {
+      try {
+        if ('wakeLock' in navigator) {
+          await (navigator as any).wakeLock.request('screen');
+          console.log("Screen Wake Lock Active 💡");
+        }
+      } catch (err) {
+        console.error("Wake Lock Error:", err);
+      }
+    };
+    keepScreenAwake();
+
+    // PeerJS Initialization
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const peer = new Peer(shortId, {
       debug: 0,
@@ -117,6 +131,14 @@ const App: React.FC = () => {
   const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
   const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
   const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
+
+  // 🔥 NEW: Retry Connection Function
+  const retryConnection = () => {
+    if (peerRef.current) {
+      setConnectionStatus('Reconnecting...');
+      peerRef.current.reconnect();
+    }
+  };
 
   // --- RECEIVER LOGIC ---
   const setupReceiverEvents = (conn: DataConnection) => {
@@ -548,7 +570,6 @@ const App: React.FC = () => {
     alert('Peer ID copied to clipboard!');
   };
 
-  // Updated Return JSX with fixed background
   return (
     <div className="min-h-screen bg-gray-900 text-white relative selection:bg-cyan-500/30">
       {/* FIX: Background Effects ko 'fixed' kar diya taki scroll karne par bhi dikhe */}
@@ -568,12 +589,31 @@ const App: React.FC = () => {
               TurboShare Pro
             </span>
           </div>
-          <div className="text-xs bg-gray-800/80 backdrop-blur px-3 py-1.5 rounded-full border border-gray-700 flex items-center gap-2 shadow-sm">
-            <div className={`w-2 h-2 rounded-full ${connectionStatus.includes('Connected') ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
-            <span className="text-gray-300">Status:</span>
-            <span className={`font-mono font-medium ${connectionStatus.includes('Connected') ? 'text-green-400' : 'text-yellow-400'}`}>
-              {connectionStatus}
-            </span>
+          
+          {/* 🔥 UPDATED: Smart Status Bar with Retry Button */}
+          <div className="flex items-center gap-2">
+            {connectionStatus.toLowerCase().includes('error') && (
+              <button 
+                onClick={retryConnection}
+                className="bg-red-500 hover:bg-red-600 text-white text-xs px-3 py-1.5 rounded-full font-bold animate-pulse transition-colors"
+              >
+                🔄 Retry
+              </button>
+            )}
+            
+            <div className="text-xs bg-gray-800/80 backdrop-blur px-3 py-1.5 rounded-full border border-gray-700 flex items-center gap-2 shadow-sm">
+              <div className={`w-2 h-2 rounded-full ${
+                connectionStatus.includes('Connected') ? 'bg-green-500 animate-pulse' : 
+                connectionStatus.includes('Error') ? 'bg-red-500' : 'bg-yellow-500'
+              }`}></div>
+              <span className="text-gray-300">Status:</span>
+              <span className={`font-mono font-medium ${
+                connectionStatus.includes('Connected') ? 'text-green-400' : 
+                connectionStatus.includes('Error') ? 'text-red-400' : 'text-yellow-400'
+              }`}>
+                {connectionStatus}
+              </span>
+            </div>
           </div>
         </div>
       </nav>
