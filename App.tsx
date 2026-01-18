@@ -77,6 +77,7 @@ const App: React.FC = () => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const peer = new Peer(shortId, {
       debug: 0,
+      pingInterval: 5000, // 🔥 ADD THIS: 5 second heartbeat to keep connection alive
       config: {
         iceServers: [
           // Purane STUN Servers (Google & Twilio) - Ye Fast Speed ke liye hain
@@ -114,16 +115,45 @@ const App: React.FC = () => {
       setupReceiverEvents(conn);
     });
 
+    // 🔥 UPDATED: Improved error handling for mobile
     peer.on('error', (err) => {
       console.error('PeerJS error:', err);
-      setConnectionStatus(`Error: ${err.type}`);
+      
+      // Agar network error hai aur hum file pick kar rahe the, toh panic mat karo, reconnect try karo
+      if (err.type === 'network' || err.type === 'peer-unavailable') {
+        setConnectionStatus('Reconnecting...');
+        setTimeout(() => {
+          if (peer.disconnected) peer.reconnect();
+        }, 1000);
+      } else {
+        setConnectionStatus(`Error: ${err.type}`);
+      }
     });
 
     peerRef.current = peer;
 
+    // 🔥 MOBILE FIX START: Jab user File Picker se wapas aaye, toh check karo
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log("App came to foreground, checking connection...");
+        
+        // Agar connection toot gaya hai (disconnected), toh wapas jodo
+        if (peer.disconnected) {
+          console.log("Connection lost in background. Reconnecting...");
+          setConnectionStatus('Reconnecting...');
+          peer.reconnect();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Cleanup function mein remove karna mat bhoolna
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       peer.destroy();
     };
+    // 🔥 MOBILE FIX END
   }, []);
 
   // BEST SETTINGS FOR MAX SPEED
