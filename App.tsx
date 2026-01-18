@@ -58,15 +58,33 @@ const App: React.FC = () => {
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
 
-  // Initialize PeerJS
+  // ✅ UPDATED PEERJS INITIALIZATION WITH NEW TURN SERVERS
   useEffect(() => {
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const peer = new Peer(shortId, {
       debug: 0,
       config: {
         iceServers: [
+          // Purane STUN Servers (Google & Twilio) - Ye Fast Speed ke liye hain
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          
+          // ✅ Naya FREE TURN Server (OpenRelay Project) - Ye Mobile Data fix karega
+          {
+            urls: "turn:openrelay.metered.ca:80",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          },
+          {
+            urls: "turn:openrelay.metered.ca:443",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          },
+          {
+            urls: "turn:openrelay.metered.ca:443?transport=tcp",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+          }
         ]
       }
     });
