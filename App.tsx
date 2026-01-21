@@ -58,6 +58,11 @@ const App: React.FC = () => {
   const writableStreamRef = useRef<FileSystemWritableFileStream | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
 
+  // Receiver Buffer State
+  const writeBufferRef = useRef<Uint8Array[]>([]);
+  const bufferSizeRef = useRef(0);
+  const DISK_FLUSH_THRESHOLD = 10 * 1024 * 1024; // 10MB buffer
+
   // ✅ UPDATED: Screen Wake Lock aur PeerJS Initialization
   useEffect(() => {
     // 🔥 NEW: Screen Wake Lock (Screen band hone se rokega)
@@ -156,12 +161,6 @@ const App: React.FC = () => {
     // 🔥 MOBILE FIX END
   }, []);
 
-  // BEST SETTINGS FOR MAX SPEED
-  const CHUNK_SIZE = 64 * 1024; // 64KB रखें
-  const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
-  const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
-  const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
-
   // 🔥 NEW: Retry Connection Function
   const retryConnection = () => {
     if (peerRef.current) {
@@ -172,6 +171,10 @@ const App: React.FC = () => {
 
   // --- RECEIVER LOGIC ---
   const setupReceiverEvents = (conn: DataConnection) => {
+    // Initialize buffer for this connection
+    writeBufferRef.current = [];
+    bufferSizeRef.current = 0;
+    
     conn.on('open', () => {
       setConnectionStatus(`Connected securely to ${conn.peer}`);
       // Set binary type for faster transfer
@@ -184,19 +187,34 @@ const App: React.FC = () => {
       const isBinary = data instanceof ArrayBuffer || data instanceof Uint8Array;
       
       if (isBinary) {
-        // Handle File Data
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         
-        // Motor Mode: Stream directly to disk
+        // Motor Mode: Use memory buffer for batch writing
         if (writableStreamRef.current) {
-          await writableStreamRef.current.write(chunk);
+          // 1. Data ko memory buffer mein daalo (Faster than Disk)
+          writeBufferRef.current.push(chunk);
+          bufferSizeRef.current += chunk.byteLength;
           bytesReceivedRef.current += chunk.byteLength;
+
+          // 2. Sirf tab Disk pe likho jab Buffer 10MB bhar jaye (Batch Writing)
+          if (bufferSizeRef.current >= DISK_FLUSH_THRESHOLD) {
+            // Create one big blob from chunks
+            const bigBlob = new Blob(writeBufferRef.current);
+            writeBufferRef.current = []; // Clear RAM
+            bufferSizeRef.current = 0;
+            await writableStreamRef.current.write(bigBlob); // Write once
+          }
         } else {
           // Fallback: Store in memory (Correctly)
           chunksRef.current.push(chunk);
           bytesReceivedRef.current += chunk.byteLength;
         }
-        updateProgress();
+        
+        // 3. UI Update ko Throttle karo (Max 1 update per second)
+        const now = Date.now();
+        if (now - lastUpdateRef.current > 1000) { // Change 200 to 1000ms
+          updateProgress();
+        }
       } 
       else if (data.type === 'meta') {
         // Handle New File Request
@@ -210,6 +228,10 @@ const App: React.FC = () => {
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
         lastUpdateRef.current = Date.now();
+        
+        // Reset buffer
+        writeBufferRef.current = [];
+        bufferSizeRef.current = 0;
         
         // Crucial: Reset these to force UI to show "Confirm" button
         setIsTransferComplete(false);
@@ -235,6 +257,15 @@ const App: React.FC = () => {
       else if (data.type === 'end') {
         // Handle File Completion
         console.log("File transfer ended. Closing stream...");
+        
+        // Flush remaining buffer if any
+        if (writableStreamRef.current && writeBufferRef.current.length > 0) {
+          const bigBlob = new Blob(writeBufferRef.current);
+          writeBufferRef.current = [];
+          bufferSizeRef.current = 0;
+          await writableStreamRef.current.write(bigBlob);
+        }
+        
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
@@ -312,7 +343,7 @@ const App: React.FC = () => {
     if (!receivedFileMetaRef.current) return;
     
     const now = Date.now();
-    if (now - lastUpdateRef.current < 200) return; // Throttle to 200ms
+    if (now - lastUpdateRef.current < 1000) return; // Throttle to 1000ms
     
     const total = receivedFileMetaRef.current.size;
     const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
@@ -467,10 +498,10 @@ const App: React.FC = () => {
 
   // 🔥 AGGRESSIVE SPEED ENGINE with BEST SETTINGS
   const startPumping = (conn: DataConnection, file: File) => {
-    // BEST SETTINGS FOR MAX SPEED:
-    const CHUNK_SIZE = 64 * 1024; // 64KB रखें
-    const MAX_BUFFERED_AMOUNT = 32 * 1024 * 1024; // 32MB करें
-    const DRAIN_THRESHOLD = 4 * 1024 * 1024; // 4MB पर resume करें
+    // 🔥 BEST SETTINGS FOR MAX SPEED:
+    const CHUNK_SIZE = 256 * 1024; // 🔥 UPDATED: 256KB for faster throughput
+    const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024; // 🔥 UPDATED: Increase to 64MB buffer
+    const DRAIN_THRESHOLD = 8 * 1024 * 1024; // 8MB पर resume करें
     const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
 
     const fileReader = new FileReader();
@@ -491,7 +522,7 @@ const App: React.FC = () => {
 
     const waitForDrain = () => {
       if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
-        // Buffer 4MB तक खाली हो गया, वापस attack करो!
+        // Buffer 8MB तक खाली हो गया, वापस attack करो!
         readNextChunk();
       } else {
         // अभी भी full है, 2ms बाद check करो
