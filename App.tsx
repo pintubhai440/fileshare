@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Tab } from './types';
 import { ChatBot } from './components/ChatBot';
 import Peer, { DataConnection } from 'peerjs';
+import { supabase } from './lib/supabase';
 
+// Interfaces
 interface FileMeta {
   name: string;
   size: number;
@@ -18,6 +20,7 @@ interface TransferStats {
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.SEND);
+  const [transferMode, setTransferMode] = useState<'p2p' | 'cloud'>('p2p');
   
   // PeerJS State
   const [myPeerId, setMyPeerId] = useState<string>('');
@@ -38,6 +41,10 @@ const App: React.FC = () => {
   const [isMotorReady, setIsMotorReady] = useState(false);
   const [isFileSaved, setIsFileSaved] = useState(false);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
+
+  // Cloud State (Supabase)
+  const [cloudLink, setCloudLink] = useState<string | null>(null);
+  const [isUploadingCloud, setIsUploadingCloud] = useState(false);
   
   // High Performance Refs
   const chunksRef = useRef<BlobPart[]>([]);
@@ -78,18 +85,15 @@ const App: React.FC = () => {
     };
     keepScreenAwake();
 
-    // PeerJS Initialization
+    // PeerJS Initialization (Only for P2P mode)
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
     const peer = new Peer(shortId, {
       debug: 0,
-      pingInterval: 5000, // 🔥 ADD THIS: 5 second heartbeat to keep connection alive
+      pingInterval: 5000,
       config: {
         iceServers: [
-          // Purane STUN Servers (Google & Twilio) - Ye Fast Speed ke liye hain
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:global.stun.twilio.com:3478' },
-          
-          // ✅ Naya FREE TURN Server (OpenRelay Project) - Ye Mobile Data fix karega
           {
             urls: "turn:openrelay.metered.ca:80",
             username: "openrelayproject",
@@ -115,16 +119,16 @@ const App: React.FC = () => {
     });
 
     peer.on('connection', (conn) => {
-      connRef.current = conn;
-      setConnectionStatus(`Connected to ${conn.peer}`);
-      setupReceiverEvents(conn);
+      if (transferMode === 'p2p') {
+        connRef.current = conn;
+        setConnectionStatus(`Connected to ${conn.peer}`);
+        setupReceiverEvents(conn);
+      }
     });
 
-    // 🔥 UPDATED: Improved error handling for mobile
     peer.on('error', (err) => {
       console.error('PeerJS error:', err);
       
-      // Agar network error hai aur hum file pick kar rahe the, toh panic mat karo, reconnect try karo
       if (err.type === 'network' || err.type === 'peer-unavailable') {
         setConnectionStatus('Reconnecting...');
         setTimeout(() => {
@@ -137,13 +141,12 @@ const App: React.FC = () => {
 
     peerRef.current = peer;
 
-    // 🔥 MOBILE FIX START: Jab user File Picker se wapas aaye, toh check karo
+    // Mobile Fix: Handle visibility change
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         console.log("App came to foreground, checking connection...");
         
-        // Agar connection toot gaya hai (disconnected), toh wapas jodo
-        if (peer.disconnected) {
+        if (peer.disconnected && transferMode === 'p2p') {
           console.log("Connection lost in background. Reconnecting...");
           setConnectionStatus('Reconnecting...');
           peer.reconnect();
@@ -153,17 +156,15 @@ const App: React.FC = () => {
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // Cleanup function mein remove karna mat bhoolna
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       peer.destroy();
     };
-    // 🔥 MOBILE FIX END
-  }, []);
+  }, [transferMode]);
 
   // 🔥 NEW: Retry Connection Function
   const retryConnection = () => {
-    if (peerRef.current) {
+    if (peerRef.current && transferMode === 'p2p') {
       setConnectionStatus('Reconnecting...');
       peerRef.current.reconnect();
     }
@@ -171,13 +172,11 @@ const App: React.FC = () => {
 
   // --- RECEIVER LOGIC ---
   const setupReceiverEvents = (conn: DataConnection) => {
-    // Initialize buffer for this connection
     writeBufferRef.current = [];
     bufferSizeRef.current = 0;
     
     conn.on('open', () => {
       setConnectionStatus(`Connected securely to ${conn.peer}`);
-      // Set binary type for faster transfer
       if (conn.dataChannel) {
         conn.dataChannel.binaryType = 'arraybuffer';
       }
@@ -189,58 +188,46 @@ const App: React.FC = () => {
       if (isBinary) {
         const chunk = data instanceof Uint8Array ? data : new Uint8Array(data);
         
-        // Motor Mode: Use memory buffer for batch writing
         if (writableStreamRef.current) {
-          // 1. Data ko memory buffer mein daalo (Faster than Disk)
           writeBufferRef.current.push(chunk);
           bufferSizeRef.current += chunk.byteLength;
           bytesReceivedRef.current += chunk.byteLength;
 
-          // 2. Sirf tab Disk pe likho jab Buffer 15MB bhar jaye (Batch Writing)
           if (bufferSizeRef.current >= DISK_FLUSH_THRESHOLD) {
-            // Create one big blob from chunks
             const bigBlob = new Blob(writeBufferRef.current);
-            writeBufferRef.current = []; // Clear RAM
+            writeBufferRef.current = [];
             bufferSizeRef.current = 0;
-            await writableStreamRef.current.write(bigBlob); // Write once
+            await writableStreamRef.current.write(bigBlob);
           }
         } else {
-          // Fallback: Store in memory (Correctly)
           chunksRef.current.push(chunk);
           bytesReceivedRef.current += chunk.byteLength;
         }
         
-        // 3. UI Update ko Throttle karo (Max 1 update per second)
         const now = Date.now();
-        if (now - lastUpdateRef.current > 1000) { // Change 200 to 1000ms
+        if (now - lastUpdateRef.current > 1000) {
           updateProgress();
         }
       } 
       else if (data.type === 'meta') {
-        // Handle New File Request
-        console.log("Meta received for:", data.meta.name);
-        setIsProcessingFile(true); // Flag to block UI flickering
+        setIsProcessingFile(true);
         receivedFileMetaRef.current = data.meta;
         setReceivedFileMeta(data.meta);
         
-        // Reset State for New File
         chunksRef.current = [];
         bytesReceivedRef.current = 0;
         lastBytesRef.current = 0;
         lastUpdateRef.current = Date.now();
         
-        // Reset buffer
         writeBufferRef.current = [];
         bufferSizeRef.current = 0;
         
-        // Crucial: Reset these to force UI to show "Confirm" button
         setIsTransferComplete(false);
         setIsMotorReady(false); 
         setIsFileSaved(false);
         setTransferProgress(0);
         setTransferSpeed('Waiting for confirmation...');
         
-        // Initialize transfer stats
         transferStatsRef.current = {
           startTime: Date.now(),
           totalBytes: 0,
@@ -248,17 +235,12 @@ const App: React.FC = () => {
           averageSpeed: 0
         };
         
-        // Close any existing stream
         if (writableStreamRef.current) {
           await writableStreamRef.current.close();
           writableStreamRef.current = null;
         }
       } 
       else if (data.type === 'end') {
-        // Handle File Completion
-        console.log("File transfer ended. Closing stream...");
-        
-        // Flush remaining buffer if any
         if (writableStreamRef.current && writeBufferRef.current.length > 0) {
           const bigBlob = new Blob(writeBufferRef.current);
           writeBufferRef.current = [];
@@ -276,19 +258,16 @@ const App: React.FC = () => {
         setIsTransferComplete(true);
         setIsProcessingFile(false);
 
-        // Calculate final stats
         const totalTime = (Date.now() - transferStatsRef.current.startTime) / 1000;
         const avgSpeed = (bytesReceivedRef.current / totalTime) / (1024 * 1024);
         transferStatsRef.current.averageSpeed = avgSpeed;
         
-        // 🔥 CRITICAL FIX: Tell Sender we are ready for the next file
         conn.send({ type: 'transfer_complete_ack' });
       }
       else if (data.type === 'ready_to_receive') {
         // Sender is ready
       }
       else if (data.type === 'file_complete') {
-        // Individual file complete in queue
         console.log(`File ${data.index + 1} completed`);
       }
     });
@@ -305,7 +284,6 @@ const App: React.FC = () => {
     if (!receivedFileMetaRef.current || !connRef.current) return;
     const meta = receivedFileMetaRef.current;
     
-    // Check browser support safely
     if ('showSaveFilePicker' in window) {
       try {
         const handle = await (window as any).showSaveFilePicker({
@@ -320,19 +298,15 @@ const App: React.FC = () => {
         setIsMotorReady(true);
         setTransferSpeed('Motor Ready ⚡');
         
-        // Notify sender we're ready
         connRef.current.send({ type: 'ready_to_receive' });
       } catch (err) {
         console.log("User cancelled file save dialog");
-        // Don't error out, just let them use fallback
         setTransferSpeed('Save cancelled (Using Fallback)');
-        // Still continue with fallback
         setIsMotorReady(true);
         connRef.current.send({ type: 'ready_to_receive' });
       }
     } else {
-      // Fallback mode for Firefox/Mobile
-      setIsMotorReady(true); // Auto-ready without popup
+      setIsMotorReady(true);
       connRef.current.send({ type: 'ready_to_receive' });
       setTransferSpeed('Ready (Auto-Save Mode)');
     }
@@ -343,7 +317,7 @@ const App: React.FC = () => {
     if (!receivedFileMetaRef.current) return;
     
     const now = Date.now();
-    if (now - lastUpdateRef.current < 1000) return; // Throttle to 1000ms
+    if (now - lastUpdateRef.current < 1000) return;
     
     const total = receivedFileMetaRef.current.size;
     const percent = Math.min(100, Math.round((bytesReceivedRef.current / total) * 100));
@@ -354,12 +328,10 @@ const App: React.FC = () => {
       const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
       setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
       
-      // Update peak speed
       if (speedMBps > transferStatsRef.current.peakSpeed) {
         transferStatsRef.current.peakSpeed = speedMBps;
       }
       
-      // Update total bytes
       transferStatsRef.current.totalBytes = bytesReceivedRef.current;
     }
     
@@ -390,7 +362,6 @@ const App: React.FC = () => {
         return;
       }
       
-      // Safe Blob Creation
       const blob = new Blob(chunksRef.current, { type: meta.type });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -423,6 +394,7 @@ const App: React.FC = () => {
       setCurrentFileIndex(0);
       setTransferProgress(0);
       setTransferSpeed('0.0 MB/s');
+      setCloudLink(null);
     }
   };
 
@@ -431,7 +403,6 @@ const App: React.FC = () => {
     
     setConnectionStatus('Connecting...');
     
-    // 🔥 CRITICAL FIX: reliable: false for MAX SPEED
     const conn = peerRef.current.connect(remotePeerId.toUpperCase(), {
       reliable: false 
     });
@@ -446,7 +417,6 @@ const App: React.FC = () => {
       return;
     }
     
-    // Start with the first file
     processFileQueue(0);
   };
 
@@ -463,7 +433,6 @@ const App: React.FC = () => {
 
     console.log(`Starting file ${index + 1}: ${file.name}`);
 
-    // 1. Send file metadata
     conn.send({
       type: 'meta',
       meta: {
@@ -476,19 +445,15 @@ const App: React.FC = () => {
     setTransferProgress(1);
     setTransferSpeed(`Waiting for receiver to accept: ${file.name}...`);
 
-    // 2. Setup One-Time Listener for this specific file transfer
     const handleTransferStep = (data: any) => {
       if (data.type === 'ready_to_receive') {
         console.log("Receiver ready, pumping data...");
-        // Start sending data
         startPumping(conn, file);
       }
       else if (data.type === 'transfer_complete_ack') {
         console.log("Receiver confirmed save. Moving to next file...");
-        // Cleanup listener and move to next file
         conn.off('data', handleTransferStep);
         
-        // Small delay to ensure UI updates
         setTimeout(() => {
           processFileQueue(index + 1);
         }, 500);
@@ -500,11 +465,10 @@ const App: React.FC = () => {
 
   // 🔥 AGGRESSIVE SPEED ENGINE with BEST SETTINGS
   const startPumping = (conn: DataConnection, file: File) => {
-    // 🔥 ULTRA FAST SETTINGS
-    const CHUNK_SIZE = 256 * 1024; // 256KB Chunks
-    const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024; // 64MB Buffer
-    const DRAIN_THRESHOLD = 8 * 1024 * 1024; // 8MB पर resume करें
-    const POLLING_INTERVAL = 5; // 5ms polling (optimized)
+    const CHUNK_SIZE = 256 * 1024;
+    const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024;
+    const DRAIN_THRESHOLD = 8 * 1024 * 1024;
+    const POLLING_INTERVAL = 5;
 
     const fileReader = new FileReader();
     let offset = 0;
@@ -527,7 +491,6 @@ const App: React.FC = () => {
         conn.send(buffer);
         offset += buffer.byteLength;
 
-        // Update UI rarely (every 500ms)
         const now = Date.now();
         if (now - lastUpdateRef.current > 500) {
           const progress = Math.min(100, Math.round((offset / file.size) * 100));
@@ -543,14 +506,12 @@ const App: React.FC = () => {
         }
 
         if (offset < file.size) {
-          // 🔥 CRITICAL LOOP LOGIC 🔥
           if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
             readNextChunk();
           } else {
             waitForDrain();
           }
         } else {
-          // Finished sending file data
           console.log("Data sent, sending END signal...");
           conn.send({ type: 'end' });
           setTransferProgress(100);
@@ -592,6 +553,7 @@ const App: React.FC = () => {
     setCurrentFileIndex(0);
     setTransferProgress(0);
     setTransferSpeed('0.0 MB/s');
+    setCloudLink(null);
   };
 
   // Remove single file from queue
@@ -610,9 +572,55 @@ const App: React.FC = () => {
     alert('Peer ID copied to clipboard!');
   };
 
+  // 🔥 NEW: Supabase Cloud Upload Function
+  const uploadToCloud = async () => {
+    if (!supabase) {
+      alert("Supabase is not configured! Check Vercel Environment Variables.");
+      return;
+    }
+    if (filesQueue.length === 0) return;
+
+    setIsUploadingCloud(true);
+    setTransferSpeed('Starting Upload...');
+    
+    try {
+      const file = filesQueue[0];
+      const fileName = `${Date.now()}_${file.name.replace(/\s/g, '_')}`;
+
+      const { data, error } = await supabase.storage
+        .from('shared-files')
+        .upload(fileName, file, {
+          cacheControl: '3600',
+          upsert: false,
+          onUploadProgress: (progress) => {
+             const percent = (progress.loaded / progress.total) * 100;
+             setTransferProgress(Math.round(percent));
+             setTransferSpeed('Uploading to Cloud... ☁️');
+          }
+        });
+
+      if (error) throw error;
+
+      const { data: publicUrlData } = supabase.storage
+        .from('shared-files')
+        .getPublicUrl(fileName);
+
+      setCloudLink(publicUrlData.publicUrl);
+      setTransferSpeed('Upload Complete! Share the link below.');
+      setTransferProgress(100);
+
+    } catch (err: any) {
+      console.error(err);
+      setTransferSpeed('Upload Failed: ' + err.message);
+      alert('Upload Error: ' + err.message);
+    } finally {
+      setIsUploadingCloud(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 text-white relative selection:bg-cyan-500/30">
-      {/* FIX: Background Effects ko 'fixed' kar diya taki scroll karne par bhi dikhe */}
+      {/* Background Effects */}
       <div className="fixed top-0 left-0 w-full h-full overflow-hidden z-0 pointer-events-none">
         <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-blue-600/20 rounded-full blur-[120px]"></div>
         <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-purple-600/20 rounded-full blur-[120px]"></div>
@@ -626,13 +634,13 @@ const App: React.FC = () => {
               <span className="text-xl">⚡</span>
             </div>
             <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white via-blue-100 to-gray-400">
-              TurboShare Pro
+              TurboShare AI Pro
             </span>
           </div>
           
-          {/* 🔥 UPDATED: Smart Status Bar with Retry Button */}
+          {/* Smart Status Bar with Retry Button */}
           <div className="flex items-center gap-2">
-            {connectionStatus.toLowerCase().includes('error') && (
+            {connectionStatus.toLowerCase().includes('error') && transferMode === 'p2p' && (
               <button 
                 onClick={retryConnection}
                 className="bg-red-500 hover:bg-red-600 text-white text-xs px-3 py-1.5 rounded-full font-bold animate-pulse transition-colors"
@@ -641,24 +649,26 @@ const App: React.FC = () => {
               </button>
             )}
             
-            <div className="text-xs bg-gray-800/80 backdrop-blur px-3 py-1.5 rounded-full border border-gray-700 flex items-center gap-2 shadow-sm">
-              <div className={`w-2 h-2 rounded-full ${
-                connectionStatus.includes('Connected') ? 'bg-green-500 animate-pulse' : 
-                connectionStatus.includes('Error') ? 'bg-red-500' : 'bg-yellow-500'
-              }`}></div>
-              <span className="text-gray-300">Status:</span>
-              <span className={`font-mono font-medium ${
-                connectionStatus.includes('Connected') ? 'text-green-400' : 
-                connectionStatus.includes('Error') ? 'text-red-400' : 'text-yellow-400'
-              }`}>
-                {connectionStatus}
-              </span>
-            </div>
+            {transferMode === 'p2p' && (
+              <div className="text-xs bg-gray-800/80 backdrop-blur px-3 py-1.5 rounded-full border border-gray-700 flex items-center gap-2 shadow-sm">
+                <div className={`w-2 h-2 rounded-full ${
+                  connectionStatus.includes('Connected') ? 'bg-green-500 animate-pulse' : 
+                  connectionStatus.includes('Error') ? 'bg-red-500' : 'bg-yellow-500'
+                }`}></div>
+                <span className="text-gray-300">Status:</span>
+                <span className={`font-mono font-medium ${
+                  connectionStatus.includes('Connected') ? 'text-green-400' : 
+                  connectionStatus.includes('Error') ? 'text-red-400' : 'text-yellow-400'
+                }`}>
+                  {connectionStatus}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </nav>
 
-      {/* Main Content - Added pb-24 for extra bottom space */}
+      {/* Main Content */}
       <main className="relative z-10 container mx-auto px-4 py-12 flex flex-col items-center pb-32">
         
         {/* Tab Switcher */}
@@ -677,23 +687,41 @@ const App: React.FC = () => {
           </button>
         </div>
 
-        {/* Device ID Display */}
-        <div className="mb-8 text-center">
-          <p className="text-gray-400 text-sm mb-2">Your Device ID (Share this)</p>
-          <div className="flex items-center gap-3 justify-center">
-            <div className="text-4xl font-mono font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-yellow-500 tracking-widest bg-black/30 px-8 py-4 rounded-2xl border border-yellow-500/20 select-all shadow-[0_0_30px_rgba(234,179,8,0.1)]">
-              {myPeerId || '...'}
-            </div>
-            <button
-              onClick={copyPeerId}
-              className="bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white p-4 rounded-xl border border-gray-700 transition-all hover:scale-105 active:scale-95"
-              title="Copy to clipboard"
-            >
-              📋
-            </button>
-          </div>
-          <p className="text-xs text-gray-500 mt-3">Share this ID with the other person to connect</p>
+        {/* MODE SWITCHER */}
+        <div className="flex items-center gap-4 mb-6 bg-gray-900/80 p-2 rounded-full border border-gray-700">
+           <button 
+             onClick={() => setTransferMode('p2p')}
+             className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${transferMode === 'p2p' ? 'bg-green-500 text-black' : 'text-gray-400'}`}
+           >
+             ⚡ Direct P2P (Fastest)
+           </button>
+           <button 
+             onClick={() => setTransferMode('cloud')}
+             className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${transferMode === 'cloud' ? 'bg-blue-500 text-white' : 'text-gray-400'}`}
+           >
+             ☁️ Cloud Store (Download Later)
+           </button>
         </div>
+
+        {/* Device ID Display (Only for P2P mode) */}
+        {transferMode === 'p2p' && (
+          <div className="mb-8 text-center">
+            <p className="text-gray-400 text-sm mb-2">Your Device ID (Share this)</p>
+            <div className="flex items-center gap-3 justify-center">
+              <div className="text-4xl font-mono font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-300 to-yellow-500 tracking-widest bg-black/30 px-8 py-4 rounded-2xl border border-yellow-500/20 select-all shadow-[0_0_30px_rgba(234,179,8,0.1)]">
+                {myPeerId || '...'}
+              </div>
+              <button
+                onClick={copyPeerId}
+                className="bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white p-4 rounded-xl border border-gray-700 transition-all hover:scale-105 active:scale-95"
+                title="Copy to clipboard"
+              >
+                📋
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">Share this ID with the other person to connect</p>
+          </div>
+        )}
 
         {/* Main Panel */}
         <div className="w-full max-w-2xl bg-gray-900/60 backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl relative overflow-hidden group">
@@ -702,6 +730,7 @@ const App: React.FC = () => {
             
             {activeTab === Tab.SEND && (
                 <div className="space-y-6">
+                  {/* File Picker Area */}
                   <div 
                     className="border-2 border-dashed border-gray-700 rounded-2xl p-10 text-center relative hover:border-blue-500 hover:bg-blue-500/5 transition-all duration-300 group-hover:shadow-[0_0_50px_rgba(59,130,246,0.1)]"
                     onDragOver={handleDragOver}
@@ -752,107 +781,159 @@ const App: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Connect Input */}
-                  <div className="flex gap-2 p-1.5 bg-gray-950/50 rounded-xl border border-gray-800 focus-within:border-blue-500/50 transition-colors">
-                    <input 
-                        type="text" 
-                        value={remotePeerId}
-                        onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
-                        placeholder="ENTER RECEIVER ID"
-                        className="flex-1 bg-transparent px-4 py-3 outline-none font-mono text-white placeholder-gray-600 uppercase tracking-wider"
-                    />
-                    <button 
-                        onClick={connectToPeer}
-                        className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg font-semibold transition-all shadow-lg shadow-blue-600/20"
-                    >
-                        Connect
-                    </button>
-                  </div>
+                  {/* Transfer Controls based on Mode */}
+                  {transferMode === 'p2p' ? (
+                     /* P2P UI */
+                     <div className="space-y-4">
+                       {/* Connect Input */}
+                       <div className="flex gap-2 p-1.5 bg-gray-950/50 rounded-xl border border-gray-800 focus-within:border-blue-500/50 transition-colors">
+                         <input 
+                             type="text" 
+                             value={remotePeerId}
+                             onChange={(e) => setRemotePeerId(e.target.value.toUpperCase())}
+                             placeholder="ENTER RECEIVER ID"
+                             className="flex-1 bg-transparent px-4 py-3 outline-none font-mono text-white placeholder-gray-600 uppercase tracking-wider"
+                         />
+                         <button 
+                             onClick={connectToPeer}
+                             className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg font-semibold transition-all shadow-lg shadow-blue-600/20"
+                         >
+                             Connect
+                         </button>
+                       </div>
 
-                  {/* Progress & Send */}
-                  {transferProgress > 0 && (
-                    <div className="space-y-2">
-                        <div className="flex justify-between text-xs font-medium">
-                            <span className="text-blue-400">Transferring file {currentFileIndex + 1}/{filesQueue.length}</span>
-                            <span className="text-green-400 font-mono">{transferSpeed}</span>
-                        </div>
-                        <div className="h-3 bg-gray-800 rounded-full overflow-hidden border border-gray-700">
-                            <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-300 relative" style={{ width: `${transferProgress}%` }}>
-                                <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
-                            </div>
-                        </div>
-                    </div>
+                       {/* Progress & Send */}
+                       {transferProgress > 0 && (
+                         <div className="space-y-2">
+                             <div className="flex justify-between text-xs font-medium">
+                                 <span className="text-blue-400">Transferring file {currentFileIndex + 1}/{filesQueue.length}</span>
+                                 <span className="text-green-400 font-mono">{transferSpeed}</span>
+                             </div>
+                             <div className="h-3 bg-gray-800 rounded-full overflow-hidden border border-gray-700">
+                                 <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-300 relative" style={{ width: `${transferProgress}%` }}>
+                                     <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                                 </div>
+                             </div>
+                         </div>
+                       )}
+
+                       <button
+                         onClick={sendAllFiles}
+                         disabled={filesQueue.length === 0 || !connectionStatus.includes('Connected')}
+                         className="w-full bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white py-4 rounded-xl font-bold text-lg shadow-lg shadow-blue-500/30 transition-all transform active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+                       >
+                         🚀 SEND ALL FILES
+                       </button>
+                     </div>
+                  ) : (
+                     /* Cloud UI */
+                     <div className="space-y-4 animate-fade-in">
+                       <button 
+                         onClick={uploadToCloud} 
+                         disabled={filesQueue.length === 0 || isUploadingCloud}
+                         className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all ${isUploadingCloud ? 'bg-gray-700 cursor-wait' : 'bg-blue-600 hover:bg-blue-500'}`}
+                       >
+                         {isUploadingCloud ? 'Uploading to Cloud...' : '☁️ UPLOAD TO CLOUD'}
+                       </button>
+
+                       {/* Progress Bar for Cloud */}
+                       {isUploadingCloud && (
+                         <div className="space-y-2">
+                            <div className="flex justify-between text-xs text-blue-300"><span>Uploading...</span><span>{transferProgress}%</span></div>
+                            <div className="h-2 bg-gray-700 rounded-full overflow-hidden"><div className="h-full bg-blue-500 transition-all" style={{ width: `${transferProgress}%` }}></div></div>
+                         </div>
+                       )}
+
+                       {/* Result Link */}
+                       {cloudLink && (
+                         <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-xl text-center">
+                           <p className="text-green-400 font-bold mb-2">✅ Upload Successful!</p>
+                           <p className="text-xs text-gray-400 mb-2">Share this link to download anytime:</p>
+                           <div className="flex gap-2">
+                             <input readOnly value={cloudLink} className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs font-mono text-gray-300 select-all" />
+                             <button onClick={() => navigator.clipboard.writeText(cloudLink)} className="bg-gray-700 px-3 rounded hover:bg-gray-600">📋</button>
+                           </div>
+                         </div>
+                       )}
+                     </div>
                   )}
-
-                  <button
-                    onClick={sendAllFiles}
-                    disabled={filesQueue.length === 0 || !connectionStatus.includes('Connected')}
-                    className="w-full bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white py-4 rounded-xl font-bold text-lg shadow-lg shadow-blue-500/30 transition-all transform active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
-                  >
-                    🚀 SEND ALL FILES
-                  </button>
                 </div>
             )}
 
             {activeTab === Tab.RECEIVE && (
                 <div className="space-y-8 text-center py-4">
-                    <div>
-                        <h2 className="text-2xl font-bold text-white mb-2">Ready to Receive</h2>
-                        <p className="text-gray-400">Your ID: <span className="text-yellow-400 font-mono font-bold tracking-wider">{myPeerId}</span></p>
-                    </div>
+                    {transferMode === 'p2p' ? (
+                       /* P2P Receive UI */
+                       <div>
+                          <h2 className="text-2xl font-bold text-white mb-2">P2P Receive Mode</h2>
+                          <p className="text-gray-400">Your ID: <span className="text-yellow-400 font-mono font-bold tracking-wider">{myPeerId}</span></p>
 
-                    {receivedFileMeta ? (
-                        <div className="bg-gray-800/50 p-6 rounded-2xl border border-gray-700/50 animate-fade-in">
-                            <div className="w-16 h-16 bg-blue-500/20 rounded-2xl flex items-center justify-center mx-auto mb-4 text-3xl">
-                                ⬇️
-                            </div>
-                            <h3 className="text-lg font-semibold text-blue-200 mb-1">{receivedFileMeta.name}</h3>
-                            <p className="text-sm text-gray-500 mb-6 font-mono">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB</p>
+                          {receivedFileMeta ? (
+                              <div className="mt-4 bg-gray-800/50 p-6 rounded-2xl border border-gray-700/50 animate-fade-in">
+                                  <div className="w-16 h-16 bg-blue-500/20 rounded-2xl flex items-center justify-center mx-auto mb-4 text-3xl">
+                                      ⬇️
+                                  </div>
+                                  <h3 className="text-lg font-semibold text-blue-200 mb-1">{receivedFileMeta.name}</h3>
+                                  <p className="text-sm text-gray-500 mb-6 font-mono">{(receivedFileMeta.size / 1024 / 1024).toFixed(2)} MB</p>
 
-                            <div className="space-y-2 mb-6">
-                                <div className="flex justify-between text-xs text-gray-400">
-                                    <span>Receiving...</span>
-                                    <span className="text-green-400 font-mono">{transferSpeed}</span>
-                                </div>
-                                <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-                                    <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${transferProgress}%` }}></div>
-                                </div>
-                            </div>
+                                  <div className="space-y-2 mb-6">
+                                      <div className="flex justify-between text-xs text-gray-400">
+                                          <span>Receiving...</span>
+                                          <span className="text-green-400 font-mono">{transferSpeed}</span>
+                                      </div>
+                                      <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                                          <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${transferProgress}%` }}></div>
+                                      </div>
+                                  </div>
 
-                            {!isMotorReady && !isTransferComplete && (
-                                <button onClick={prepareMotor} className="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold text-white shadow-lg shadow-green-500/20 transition-all flex items-center justify-center gap-2 animate-bounce">
-                                    <span>⚡</span> Enable High-Speed Save
-                                </button>
-                            )}
+                                  {!isMotorReady && !isTransferComplete && (
+                                      <button onClick={prepareMotor} className="w-full bg-green-600 hover:bg-green-500 py-3 rounded-xl font-bold text-white shadow-lg shadow-green-500/20 transition-all flex items-center justify-center gap-2 animate-bounce">
+                                          <span>⚡</span> Enable High-Speed Save
+                                      </button>
+                                  )}
 
-                            {isTransferComplete && (
-                                <div className="space-y-3">
-                                    {!writableStreamRef.current && !isFileSaved && (
-                                        <button onClick={handleSaveFile} className="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-xl font-bold text-white shadow-lg transition-all">
-                                            💾 Save File
-                                        </button>
-                                    )}
-                                    <div className="p-3 bg-green-500/10 border border-green-500/20 rounded-lg text-green-400 text-sm font-medium">
-                                        ✨ File Transfer Complete!
-                                    </div>
-                                </div>
-                            )}
-                        </div>
+                                  {isTransferComplete && (
+                                      <div className="space-y-3">
+                                          {!writableStreamRef.current && !isFileSaved && (
+                                              <button onClick={handleSaveFile} className="w-full bg-purple-600 hover:bg-purple-500 py-3 rounded-xl font-bold text-white shadow-lg transition-all">
+                                                  💾 Save File
+                                              </button>
+                                          )}
+                                          <div className="p-3 bg-green-500/10 border border-green-500/20 rounded-lg text-green-400 text-sm font-medium">
+                                              ✨ File Transfer Complete!
+                                          </div>
+                                      </div>
+                                  )}
+                              </div>
+                          ) : (
+                              <div className="py-12 border-2 border-dashed border-gray-800 rounded-2xl">
+                                  <div className="animate-pulse text-4xl mb-4">📡</div>
+                                  <p className="text-gray-500 font-medium">Waiting for incoming connection...</p>
+                              </div>
+                          )}
+                       </div>
                     ) : (
-                        <div className="py-12 border-2 border-dashed border-gray-800 rounded-2xl">
-                            <div className="animate-pulse text-4xl mb-4">📡</div>
-                            <p className="text-gray-500 font-medium">Waiting for incoming connection...</p>
-                        </div>
+                       /* Cloud Receive UI */
+                       <div className="animate-fade-in">
+                          <h2 className="text-2xl font-bold text-white mb-4">Cloud Download</h2>
+                          <p className="text-gray-400 text-sm mb-6">Paste the link shared by the sender to download instantly.</p>
+                          <input 
+                            type="text" 
+                            placeholder="Paste Link Here..." 
+                            className="w-full bg-gray-800 border border-gray-600 rounded-xl px-4 py-3 text-white mb-4 focus:border-blue-500 outline-none" 
+                            onChange={(e) => { if(e.target.value) window.open(e.target.value, '_blank'); }}
+                          />
+                          <p className="text-xs text-gray-500">Note: Clicking the link will start the download in your browser immediately.</p>
+                       </div>
                     )}
                 </div>
             )}
         </div>
-
       </main>
 
       {/* Footer */}
       <footer className="relative z-10 text-center text-gray-600 text-xs py-6 border-t border-white/5">
-        <p>TurboShare Pro • Secured by WebRTC • Peer-to-Peer Encryption</p>
+        <p>TurboShare AI Pro • Secured by WebRTC • P2P & Cloud Support</p>
       </footer>
 
       {/* Chat Widget */}
