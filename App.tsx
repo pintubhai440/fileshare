@@ -37,7 +37,7 @@ const App: React.FC = () => {
   const [isTransferComplete, setIsTransferComplete] = useState(false);
   const [isMotorReady, setIsMotorReady] = useState(false);
   const [isFileSaved, setIsFileSaved] = useState(false);
-  const [isProcessingFile, setIsProcessingFile] = useState(false); // New Flag
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
   
   // High Performance Refs
   const chunksRef = useRef<BlobPart[]>([]);
@@ -61,7 +61,7 @@ const App: React.FC = () => {
   // Receiver Buffer State
   const writeBufferRef = useRef<Uint8Array[]>([]);
   const bufferSizeRef = useRef(0);
-  const DISK_FLUSH_THRESHOLD = 10 * 1024 * 1024; // 10MB buffer
+  const DISK_FLUSH_THRESHOLD = 15 * 1024 * 1024; // 15MB buffer
 
   // ✅ UPDATED: Screen Wake Lock aur PeerJS Initialization
   useEffect(() => {
@@ -196,7 +196,7 @@ const App: React.FC = () => {
           bufferSizeRef.current += chunk.byteLength;
           bytesReceivedRef.current += chunk.byteLength;
 
-          // 2. Sirf tab Disk pe likho jab Buffer 10MB bhar jaye (Batch Writing)
+          // 2. Sirf tab Disk pe likho jab Buffer 15MB bhar jaye (Batch Writing)
           if (bufferSizeRef.current >= DISK_FLUSH_THRESHOLD) {
             // Create one big blob from chunks
             const bigBlob = new Blob(writeBufferRef.current);
@@ -430,8 +430,10 @@ const App: React.FC = () => {
     if (!remotePeerId || !peerRef.current) return;
     
     setConnectionStatus('Connecting...');
+    
+    // 🔥 CRITICAL FIX: reliable: false for MAX SPEED
     const conn = peerRef.current.connect(remotePeerId.toUpperCase(), {
-      reliable: true
+      reliable: false 
     });
     connRef.current = conn;
     setupReceiverEvents(conn);
@@ -498,34 +500,21 @@ const App: React.FC = () => {
 
   // 🔥 AGGRESSIVE SPEED ENGINE with BEST SETTINGS
   const startPumping = (conn: DataConnection, file: File) => {
-    // 🔥 BEST SETTINGS FOR MAX SPEED:
-    const CHUNK_SIZE = 256 * 1024; // 🔥 UPDATED: 256KB for faster throughput
-    const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024; // 🔥 UPDATED: Increase to 64MB buffer
+    // 🔥 ULTRA FAST SETTINGS
+    const CHUNK_SIZE = 256 * 1024; // 256KB Chunks
+    const MAX_BUFFERED_AMOUNT = 64 * 1024 * 1024; // 64MB Buffer
     const DRAIN_THRESHOLD = 8 * 1024 * 1024; // 8MB पर resume करें
-    const POLLING_INTERVAL = 2; // 2ms polling (aggressive)
+    const POLLING_INTERVAL = 5; // 5ms polling (optimized)
 
     const fileReader = new FileReader();
     let offset = 0;
-    let totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    let chunksSent = 0;
-
     lastUpdateRef.current = Date.now();
     lastBytesRef.current = 0;
 
-    // Initialize sender stats
-    const senderStats = {
-      startTime: Date.now(),
-      totalBytes: 0,
-      peakSpeed: 0,
-      averageSpeed: 0
-    };
-
     const waitForDrain = () => {
       if (conn.dataChannel.bufferedAmount < DRAIN_THRESHOLD) {
-        // Buffer 8MB तक खाली हो गया, वापस attack करो!
         readNextChunk();
       } else {
-        // अभी भी full है, 2ms बाद check करो
         setTimeout(waitForDrain, POLLING_INTERVAL);
       }
     };
@@ -533,27 +522,20 @@ const App: React.FC = () => {
     fileReader.onload = (e) => {
       if (!e.target?.result) return;
       const buffer = e.target.result as ArrayBuffer;
-      chunksSent++;
-
+      
       try {
         conn.send(buffer);
         offset += buffer.byteLength;
-        senderStats.totalBytes = offset;
 
-        // UI Update Logic (Har 300ms pe update, taaki CPU free rahe)
+        // Update UI rarely (every 500ms)
         const now = Date.now();
-        if (now - lastUpdateRef.current > 300) {
+        if (now - lastUpdateRef.current > 500) {
           const progress = Math.min(100, Math.round((offset / file.size) * 100));
           const bytesDiff = offset - lastBytesRef.current;
           const timeDiff = (now - lastUpdateRef.current) / 1000;
           if (timeDiff > 0) {
             const speedMBps = (bytesDiff / timeDiff) / (1024 * 1024);
             setTransferSpeed(`${speedMBps.toFixed(1)} MB/s`);
-            
-            // Update peak speed
-            if (speedMBps > senderStats.peakSpeed) {
-              senderStats.peakSpeed = speedMBps;
-            }
           }
           setTransferProgress(progress);
           lastUpdateRef.current = now;
@@ -562,11 +544,9 @@ const App: React.FC = () => {
 
         if (offset < file.size) {
           // 🔥 CRITICAL LOOP LOGIC 🔥
-          // Agar buffer me jagah hai, to turant agla packet padho (No waiting)
           if (conn.dataChannel.bufferedAmount < MAX_BUFFERED_AMOUNT) {
             readNextChunk();
           } else {
-            // Agar buffer full hai, to wait karo
             waitForDrain();
           }
         } else {
@@ -575,11 +555,10 @@ const App: React.FC = () => {
           conn.send({ type: 'end' });
           setTransferProgress(100);
           setTransferSpeed('Waiting for save confirmation...');
-          // Note: We DO NOT call next file here. We wait for 'transfer_complete_ack'
         }
       } catch (err) {
         console.error("Error sending, retrying...", err);
-        setTimeout(readNextChunk, 100);
+        setTimeout(readNextChunk, 50);
       }
     };
 
