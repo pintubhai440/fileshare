@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Tab } from './types';
 import { ChatBot } from './components/ChatBot';
 import Peer, { DataConnection } from 'peerjs';
-import { supabase } from './lib/supabase';
+import { supabase } from './services/lib/supabase';
 
 // Interfaces
 interface FileMeta {
