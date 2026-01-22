@@ -1,82 +1,50 @@
-// 🔥 UPDATED: Multi-File Batch Upload Support
-  const uploadToGoogleDrive = async () => {
-    if (filesQueue.length === 0) return;
-    
-    setIsUploadingCloud(true);
-    setTransferProgress(0);
-    
-    const uploadedLinks: string[] = []; // सारे लिंक्स यहाँ जमा होंगे
+import { google } from 'googleapis';
 
-    try {
-      // Loop through ALL selected files
-      for (let i = 0; i < filesQueue.length; i++) {
-        const file = filesQueue[i];
-        
-        // Update Status
-        setTransferSpeed(`Preparing file ${i + 1} of ${filesQueue.length}: ${file.name}...`);
+export const config = {
+  api: {
+    bodyParser: true, // JSON Body चाहिए
+  },
+};
 
-        // 1. Get Link for Current File
-        const authResponse = await fetch('/api/upload-to-drive', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            name: file.name, 
-            type: file.type || 'application/octet-stream' 
-          })
-        });
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
-        if (!authResponse.ok) throw new Error(`Failed to get link for ${file.name}`);
-        const { uploadUrl } = await authResponse.json();
+  try {
+    const { name, type } = req.body; // Frontend से Name और Type ले रहे हैं
 
-        // 2. Upload File (Wrapped in Promise for Loop)
-        const fileLink = await new Promise<string>((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('PUT', uploadUrl, true);
-            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      "https://developers.google.com/oauthplayground"
+    );
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
 
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 100);
-                // Show progress for current file
-                setTransferSpeed(`Uploading ${i + 1}/${filesQueue.length}: ${file.name} (${percent}%)`);
-                setTransferProgress(percent);
-              }
-            };
+    const { token } = await oauth2Client.getAccessToken();
 
-            xhr.onload = () => {
-              if (xhr.status === 200 || xhr.status === 201) {
-                try {
-                  const result = JSON.parse(xhr.responseText);
-                  resolve(result.webViewLink);
-                } catch (e) {
-                  // Fallback if JSON fails but upload worked
-                  resolve("Link Unavailable");
-                }
-              } else {
-                reject(new Error(`Upload failed: ${xhr.status}`));
-              }
-            };
+    const metadata = {
+      name: name,
+      parents: [process.env.GOOGLE_FOLDER_ID],
+    };
 
-            xhr.onerror = () => reject(new Error('Network Error'));
-            xhr.send(file);
-        });
+    // Google से "Link" मांग रहे हैं (Upload नहीं कर रहे)
+    const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,webViewLink', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'X-Upload-Content-Type': type,
+        'Origin': req.headers.origin || 'https://fileshare-umber.vercel.app'
+      },
+      body: JSON.stringify(metadata)
+    });
 
-        // लिंक लिस्ट में डालें
-        uploadedLinks.push(fileLink);
-      }
+    const uploadUrl = response.headers.get('location');
+    if (!uploadUrl) throw new Error('Google did not provide an upload URL');
 
-      // 3. Final Success State
-      setTransferSpeed('All Files Uploaded Successfully! 🎉');
-      setTransferProgress(100);
-      
-      // सारे लिंक्स को एक साथ दिखाएं (Separator के साथ)
-      setCloudLink(uploadedLinks.join("   |   ")); 
-      
-    } catch (err: any) {
-      console.error(err);
-      setTransferSpeed('Error: ' + err.message);
-      alert('Error: ' + err.message);
-    } finally {
-      setIsUploadingCloud(false);
-    }
-  };
+    res.status(200).json({ uploadUrl });
+
+  } catch (error) {
+    console.error('API Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+}
