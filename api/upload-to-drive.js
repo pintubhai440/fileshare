@@ -55,6 +55,7 @@ export default async function handler(req, res) {
         resource: fileMetadata,
         media: media,
         fields: 'id, webViewLink',
+        supportsAllDrives: true,
       });
 
       // सफलता पर लिंक वापस भेजें
