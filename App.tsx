@@ -610,11 +610,12 @@ const App: React.FC = () => {
             
             "# 2. Merge Files\n",
             "import os\n",
-            `folder_path = '/content/drive/My Drive/Shared_Uploads/${fileName}_Folder'\n`, // Folder Path detection needed
+            // ✅ FIXED: Shared_Uploads हटा दिया ताकि सीधे My Drive में ढूंढे
+            `folder_path = '/content/drive/My Drive/${fileName}_Folder'\n`,
             `output_file = '/content/drive/My Drive/${fileName}'\n\n`,
             
             "print('⏳ Merging files... Please wait.')\n",
-            `os.system(f'cat "{folder_path}/${fileName}.part"* > "{output_file}"')\n\n`,
+            `os.system(f'cat \"{folder_path}/{fileName}.part\"* > \"{output_file}\"')\n\n`,
             
             "print('✅ SUCCESS! File merged successfully.')\n",
             "print(f'📁 You can find {fileName} in your Google Drive root folder.')"
@@ -659,7 +660,8 @@ const App: React.FC = () => {
       }
 
       // 3. Upload All Parts to that Folder (Parallel)
-      setTransferSpeed('Uploading Parts to Workspace... 🚀');
+      // ✅ IMPROVED: Better Message for Parallel Upload (No flickering)
+      setTransferSpeed(`Uploading ${totalParts} parts in parallel... 🚀`);
       const uploadedBytesPerPart = new Array(parts.length).fill(0);
       const totalSize = file.size;
 
@@ -683,8 +685,10 @@ const App: React.FC = () => {
             xhr.upload.onprogress = (e) => {
               uploadedBytesPerPart[index] = e.loaded;
               const totalUploaded = uploadedBytesPerPart.reduce((a, b) => a + b, 0);
-              setTransferProgress(Math.round((totalUploaded / totalSize) * 100));
-              setTransferSpeed(`Uploading Part ${index + 1}/${totalParts}... 🚀`);
+              const percent = Math.round((totalUploaded / totalSize) * 100);
+              setTransferProgress(percent);
+              // ✅ IMPROVED: Single message for parallel upload
+              setTransferSpeed(`Uploading ${totalParts} parts in parallel... 🚀 ${percent}%`);
             };
             xhr.onload = () => resolve("OK");
             xhr.onerror = () => reject();
@@ -1191,5 +1195,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-
-ab code sahi hai
