@@ -606,24 +606,31 @@ const App: React.FC = () => {
     alert('Peer ID copied to clipboard!');
   };
 
-  // 🔥 UPDATED: Multi-File Batch Upload Support for Google Drive
+  // 🔥 ULTRA-FAST: Parallel Multi-File Upload (Parts will fly together!)
   const uploadToGoogleDrive = async () => {
     if (filesQueue.length === 0) return;
     
     setIsUploadingCloud(true);
     setTransferProgress(0);
+    setTransferSpeed('Preparing Parallel Uploads... 🚀');
     
-    const uploadedLinks: string[] = []; // सारे लिंक्स यहाँ जमा होंगे
+    // प्रोग्रेस ट्रैक करने के लिए (To track total progress accurately)
+    const totalSize = filesQueue.reduce((acc, file) => acc + file.size, 0);
+    const uploadedBytesPerFile = new Array(filesQueue.length).fill(0);
+
+    // यह फंक्शन बार-बार टोटल प्रोग्रेस अपडेट करेगा
+    const updateAggregateProgress = () => {
+        const totalUploaded = uploadedBytesPerFile.reduce((acc, val) => acc + val, 0);
+        const percent = Math.round((totalUploaded / totalSize) * 100);
+        setTransferProgress(percent);
+        setTransferSpeed(`Uploading ${filesQueue.length} parts together... ☁️ ${percent}%`);
+    };
 
     try {
-      // Loop through ALL selected files
-      for (let i = 0; i < filesQueue.length; i++) {
-        const file = filesQueue[i];
+      // 1. सारी फाइलों के लिए एक साथ काम शुरू करें (Create Jobs)
+      const uploadPromises = filesQueue.map(async (file, index) => {
         
-        // Update Status
-        setTransferSpeed(`Preparing file ${i + 1} of ${filesQueue.length}: ${file.name}...`);
-
-        // 1. Get Link for Current File
+        // A. Google से लिंक मांगें
         const authResponse = await fetch('/api/upload-to-drive', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -636,18 +643,18 @@ const App: React.FC = () => {
         if (!authResponse.ok) throw new Error(`Failed to get link for ${file.name}`);
         const { uploadUrl } = await authResponse.json();
 
-        // 2. Upload File (Wrapped in Promise for Loop)
-        const fileLink = await new Promise<string>((resolve, reject) => {
+        // B. फाइल भेजें (Upload) - Wrapped in Promise
+        return new Promise<string>((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open('PUT', uploadUrl, true);
             xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
 
             xhr.upload.onprogress = (e) => {
               if (e.lengthComputable) {
-                const percent = Math.round((e.loaded / e.total) * 100);
-                // Show progress for current file
-                setTransferSpeed(`Uploading ${i + 1}/${filesQueue.length}: ${file.name} (${percent}%)`);
-                setTransferProgress(percent);
+                // सिर्फ इस फाइल का डेटा अपडेट करें
+                uploadedBytesPerFile[index] = e.loaded; 
+                // टोटल प्रोग्रेस दोबारा गिनें
+                updateAggregateProgress(); 
               }
             };
 
@@ -657,7 +664,6 @@ const App: React.FC = () => {
                   const result = JSON.parse(xhr.responseText);
                   resolve(result.webViewLink);
                 } catch (e) {
-                  // Fallback if JSON fails but upload worked
                   resolve("Link Unavailable");
                 }
               } else {
@@ -666,24 +672,26 @@ const App: React.FC = () => {
             };
 
             xhr.onerror = () => reject(new Error('Network Error'));
+            
+            // 🔥 The Real Speed Booster: Send raw binary directly
             xhr.send(file);
         });
+      });
 
-        // लिंक लिस्ट में डालें
-        uploadedLinks.push(fileLink);
-      }
+      // 2. BOOM! सब एक साथ चलाएं (Execute Parallel)
+      const links = await Promise.all(uploadPromises);
 
-      // 3. Final Success State
-      setTransferSpeed('All Files Uploaded Successfully! 🎉');
+      // 3. Success
+      setTransferSpeed('All Parts Uploaded Super Fast! ⚡');
       setTransferProgress(100);
       
-      // सारे लिंक्स को एक साथ दिखाएं (Separator के साथ)
-      setCloudLink(uploadedLinks.join("   |   ")); 
+      // सारे लिंक्स दिखाएं
+      setCloudLink(links.join("   |   ")); 
       
     } catch (err: any) {
       console.error(err);
       setTransferSpeed('Error: ' + err.message);
-      alert('Error: ' + err.message);
+      alert('One or more uploads failed. Check console.');
     } finally {
       setIsUploadingCloud(false);
     }
@@ -968,7 +976,7 @@ const App: React.FC = () => {
                          {isUploadingCloud 
                            ? 'Uploading...' 
                            : transferMode === 'google-drive' 
-                             ? '📁 UPLOAD TO GOOGLE DRIVE' 
+                             ? `📁 PARALLEL UPLOAD TO GOOGLE DRIVE (${filesQueue.length} files)` 
                              : '☁️ UPLOAD TO SUPABASE'}
                        </button>
 
@@ -976,11 +984,20 @@ const App: React.FC = () => {
                        {isUploadingCloud && (
                          <div className="space-y-2">
                             <div className="flex justify-between text-xs">
-                              <span className="text-blue-300">Uploading...</span>
+                              <span className="text-blue-300">
+                                {transferMode === 'google-drive' ? 'Parallel Uploading... 🚀' : 'Uploading...'}
+                              </span>
                               <span className="text-green-300">{transferProgress}%</span>
                             </div>
                             <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
-                              <div className="h-full bg-blue-500 transition-all" style={{ width: `${transferProgress}%` }}></div>
+                              <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all" style={{ width: `${transferProgress}%` }}>
+                                {transferMode === 'google-drive' && (
+                                  <div className="absolute inset-0 bg-white/20 animate-[shimmer_1.5s_infinite]"></div>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-center text-xs text-gray-400">
+                              {transferSpeed}
                             </div>
                          </div>
                        )}
