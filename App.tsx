@@ -595,9 +595,9 @@ const App: React.FC = () => {
 
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', uploadUrl, true);
-
-      // Testing ke liye fix type bhej ke dekho
-      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      
+      // ✅ FIX: Ye line zaroori hai, warna Network Error aayega!
+      xhr.setRequestHeader('Content-Type', fileType);
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
