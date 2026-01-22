@@ -389,13 +389,45 @@ const App: React.FC = () => {
     }
   };
 
-  // Sender Logic
+  // 🔥 NEW: Smart File Splitter (Auto-slices large files for speed)
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      setFilesQueue(Array.from(e.target.files));
+      const originalFiles = Array.from(e.target.files);
+      const processedQueue: File[] = [];
+      const SPLIT_SIZE = 1000 * 1024 * 1024; // 1 GB Chunk Size
+
+      originalFiles.forEach((file) => {
+        // अगर फाइल 1.5 GB से बड़ी है, तो उसे काट दो
+        if (file.size > 1.5 * 1024 * 1024 * 1024) {
+          const totalParts = Math.ceil(file.size / SPLIT_SIZE);
+          
+          for (let i = 0; i < totalParts; i++) {
+            const start = i * SPLIT_SIZE;
+            const end = Math.min(file.size, start + SPLIT_SIZE);
+            
+            // फाइल का टुकड़ा बनाएं (Slice)
+            const chunkBlob = file.slice(start, end);
+            
+            // इसे एक नई फाइल का नाम दें (e.g., Movie.mp4.part1)
+            const chunkFile = new File(
+              [chunkBlob], 
+              `${file.name}.part${i + 1}`, 
+              { type: file.type || 'application/octet-stream' }
+            );
+            
+            processedQueue.push(chunkFile);
+          }
+          alert(`⚡ Speed Boost: "${file.name}" was split into ${totalParts} parts for faster upload!`);
+        } else {
+          // छोटी फाइल को वैसे ही रहने दें
+          processedQueue.push(file);
+        }
+      });
+
+      setFilesQueue(prev => [...prev, ...processedQueue]);
       setCurrentFileIndex(0);
       setTransferProgress(0);
-      setTransferSpeed('0.0 MB/s');
+      setTransferSpeed('Ready to Upload');
       setCloudLink(null);
     }
   };
