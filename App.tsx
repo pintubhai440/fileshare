@@ -72,18 +72,19 @@ const App: React.FC = () => {
 
   // ✅ UPDATED: Screen Wake Lock aur PeerJS Initialization
   useEffect(() => {
-    // 🔥 NEW: Screen Wake Lock (Screen band hone se rokega)
+    // 🔥 IMPROVED: Screen Wake Lock (Optimized for mobile)
     const keepScreenAwake = async () => {
-      try {
-        if ('wakeLock' in navigator) {
+      // केवल तभी रिक्वेस्ट करें जब पेज visible हो
+      if ('wakeLock' in navigator && document.visibilityState === 'visible') {
+        try {
           await (navigator as any).wakeLock.request('screen');
-          console.log("Screen Wake Lock Active 💡");
+        } catch (err) {
+          console.log("Wake Lock blocked");
         }
-      } catch (err) {
-        console.error("Wake Lock Error:", err);
       }
     };
     keepScreenAwake();
+    document.addEventListener('visibilitychange', keepScreenAwake);
 
     // PeerJS Initialization (Only for P2P mode)
     const shortId = Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -141,7 +142,7 @@ const App: React.FC = () => {
 
     peerRef.current = peer;
 
-    // Mobile Fix: Handle visibility change
+    // Mobile Fix: Handle visibility change for PeerJS
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         console.log("App came to foreground, checking connection...");
@@ -157,6 +158,7 @@ const App: React.FC = () => {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      document.removeEventListener('visibilitychange', keepScreenAwake);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       peer.destroy();
     };
