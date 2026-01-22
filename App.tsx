@@ -953,20 +953,28 @@ const App: React.FC = () => {
                          </div>
                        )}
 
-                       {/* Result Link */}
+                       {/* Result Link - UPDATED WITH MULTI-LINE TEXTAREA */}
                        {cloudLink && (
-                         <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-xl text-center">
-                           <p className="text-green-400 font-bold mb-2">✅ Upload Successful!</p>
-                           <p className="text-xs text-gray-400 mb-2">Share this link to download anytime:</p>
-                           <div className="flex gap-2">
-                             <input 
+                         <div className="mt-4 p-4 bg-green-500/10 border border-green-500/30 rounded-xl text-center animate-fade-in">
+                           <p className="text-green-400 font-bold mb-2">✅ All Files Uploaded!</p>
+                           <p className="text-xs text-gray-400 mb-2">Copy your download links below:</p>
+                           
+                           <div className="relative group">
+                             <textarea 
                                readOnly 
-                               value={cloudLink} 
-                               className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs font-mono text-gray-300 select-all truncate" 
+                               value={cloudLink.split("   |   ").join("\n")} // लिंक्स को अलग-अलग लाइन में दिखाएगा
+                               rows={5}
+                               className="w-full bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-xs font-mono text-gray-300 select-all resize-none focus:border-green-500 outline-none custom-scrollbar whitespace-pre"
                              />
+                             
+                             {/* Copy Button (Floating inside) */}
                              <button 
-                               onClick={() => navigator.clipboard.writeText(cloudLink)} 
-                               className="bg-gray-700 px-3 rounded hover:bg-gray-600 transition-colors"
+                               onClick={() => {
+                                 navigator.clipboard.writeText(cloudLink.split("   |   ").join("\n"));
+                                 alert("All links copied!");
+                               }} 
+                               className="absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 p-2 rounded-md transition-colors shadow-lg"
+                               title="Copy All Links"
                              >
                                📋
                              </button>
