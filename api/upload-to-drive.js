@@ -1,82 +1,55 @@
 import { google } from 'googleapis';
-import multiparty from 'multiparty';
-import fs from 'fs';
 
-// Vercel Configuration: Body parsing disable keeps multiparty working
 export const config = {
   api: {
-    bodyParser: false,
+    bodyParser: true, // अब हमें JSON बॉडी चाहिए
   },
 };
 
 export default async function handler(req, res) {
-  // Only allow POST requests
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+
+  try {
+    // 1. Frontend से फाइल नहीं, सिर्फ उसका नाम और टाइप मांगें
+    const { name, type } = req.body;
+
+    // 2. Auth Setup (वही पुराना सही वाला)
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      "https://developers.google.com/oauthplayground"
+    );
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+
+    // 3. Access Token निकालें
+    const { token } = await oauth2Client.getAccessToken();
+
+    // 4. Google से "Resumable Upload Link" मांगें
+    const metadata = {
+      name: name,
+      parents: [process.env.GOOGLE_FOLDER_ID],
+    };
+
+    const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'X-Upload-Content-Type': type
+      },
+      body: JSON.stringify(metadata)
+    });
+
+    // 5. Google ने जो Link दिया (Header में), वो निकालें
+    const uploadUrl = response.headers.get('location');
+
+    if (!uploadUrl) throw new Error('Google did not provide an upload URL');
+
+    // 6. वो Link फ्रंटएंड को भेज दें
+    res.status(200).json({ uploadUrl });
+
+  } catch (error) {
+    console.error('API Error:', error);
+    res.status(500).json({ error: error.message });
   }
-
-  const form = new multiparty.Form();
-
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      console.error('Form parse error:', err);
-      return res.status(500).json({ error: 'Error parsing form data' });
-    }
-
-    try {
-      // 1. OAuth2 Client Setup (OLD Service Account Code Removed)
-      // अब हम Client ID और Secret का उपयोग कर रहे हैं जो आपने Cloud Console से निकाला है
-      const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        "https://developers.google.com/oauthplayground" // Redirect URI match होना चाहिए
-      );
-
-      // 2. Set Credentials using Refresh Token
-      // यह सबसे ज़रूरी स्टेप है - इससे गूगल को पता चलता है कि आप (Owner) फाइल अपलोड कर रहे हैं
-      oauth2Client.setCredentials({
-        refresh_token: process.env.GOOGLE_REFRESH_TOKEN
-      });
-
-      // 3. Initialize Drive
-      const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
-      // File handling logic remains the same
-      const uploadedFile = files.file[0];
-      const fileName = fields.name ? fields.name[0] : uploadedFile.originalFilename;
-      const fileType = fields.type ? fields.type[0] : 'application/octet-stream';
-
-      // 4. Create File Metadata
-      const fileMetadata = {
-        name: fileName,
-        parents: [process.env.GOOGLE_FOLDER_ID], // Target Folder ID
-      };
-
-      const media = {
-        mimeType: fileType,
-        body: fs.createReadStream(uploadedFile.path),
-      };
-
-      // 5. Upload to Drive (Uses User Quota)
-      const response = await drive.files.create({
-        requestBody: fileMetadata, // Note: v3 uses 'requestBody', not 'resource'
-        media: media,
-        fields: 'id, webViewLink',
-        supportsAllDrives: true,
-      });
-
-      // Success Response
-      res.status(200).json({ 
-        success: true, 
-        viewerLink: response.data.webViewLink,
-        fileId: response.data.id 
-      });
-
-    } catch (error) {
-      console.error('Google Drive Upload Error:', error);
-      // Detailed error logging for debugging
-      const errorMessage = error.response?.data?.error?.message || error.message;
-      res.status(500).json({ error: errorMessage });
-    }
-  });
 }
