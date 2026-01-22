@@ -56,6 +56,7 @@ export default async function handler(req, res) {
         media: media,
         fields: 'id, webViewLink',
         supportsAllDrives: true,
+        keepRevisionForever: true
       });
 
       // सफलता पर लिंक वापस भेजें
