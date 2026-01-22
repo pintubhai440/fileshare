@@ -572,7 +572,7 @@ const App: React.FC = () => {
     alert('Peer ID copied to clipboard!');
   };
 
-  // 🔥 NEW: Direct Google Drive Upload Function
+  // 🔥 UPDATED: Direct Google Drive Upload Function with FIXES
   const uploadToGoogleDrive = async () => {
     if (filesQueue.length === 0) return;
 
@@ -581,9 +581,11 @@ const App: React.FC = () => {
     
     try {
       const file = filesQueue[0];
+      // Type agar khali ho to default lagao
+      const fileType = file.type || 'application/octet-stream';
 
       // 1. Backend se Link Mango
-      const res = await fetch(`/api/get-upload-url?name=${encodeURIComponent(file.name)}&type=${encodeURIComponent(file.type)}`);
+      const res = await fetch(`/api/get-upload-url?name=${encodeURIComponent(file.name)}&type=${encodeURIComponent(fileType)}`);
       
       if (!res.ok) throw new Error('Failed to get upload link');
       const { uploadUrl } = await res.json();
@@ -593,6 +595,9 @@ const App: React.FC = () => {
 
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', uploadUrl, true);
+      
+      // ✅ FIX: Ye line zaroori hai, warna Network Error aayega!
+      xhr.setRequestHeader('Content-Type', fileType);
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -603,23 +608,30 @@ const App: React.FC = () => {
       };
 
       xhr.onload = () => {
-        if (xhr.status === 200 || xhr.status === 201) {
-          const response = JSON.parse(xhr.responseText);
-          // Public View Link
-          const viewerLink = `https://drive.google.com/file/d/${response.id}/view?usp=sharing`;
-          
-          setCloudLink(viewerLink);
-          setTransferSpeed('Upload Complete! Share the link below.');
-          setTransferProgress(100);
+        if (xhr.status === 200 || xhr.status === 201 || xhr.status === 308) {
+          // Response check karo
+          try {
+             const response = JSON.parse(xhr.responseText);
+             const viewerLink = `https://drive.google.com/file/d/${response.id}/view?usp=sharing`;
+             setCloudLink(viewerLink);
+             setTransferSpeed('Upload Complete! Share the link below.');
+             setTransferProgress(100);
+          } catch(e) {
+             console.log("Upload done but response parsing failed", xhr.responseText);
+             // Agar upload ho gaya par response JSON nahi hai (Google kabhi kabhi 308 deta hai resume ke liye)
+             setTransferSpeed('Upload Done! (Processing...)');
+             setTransferProgress(100);
+          }
         } else {
-          console.error('Upload Error:', xhr.responseText);
-          alert('Upload Failed via Google');
+          console.error('Upload Error Status:', xhr.status, xhr.responseText);
+          alert(`Upload Failed: Server sent ${xhr.status}`);
         }
         setIsUploadingCloud(false);
       };
 
       xhr.onerror = () => {
-        alert('Network Error during Upload');
+        console.error('XHR Network Error');
+        alert('Network Error: Check Internet or CORS');
         setIsUploadingCloud(false);
       };
 
@@ -919,8 +931,13 @@ const App: React.FC = () => {
                        {/* Progress Bar for Cloud */}
                        {isUploadingCloud && (
                          <div className="space-y-2">
-                            <div className="flex justify-between text-xs text-blue-300"><span>Uploading...</span><span>{transferProgress}%</span></div>
-                            <div className="h-2 bg-gray-700 rounded-full overflow-hidden"><div className="h-full bg-blue-500 transition-all" style={{ width: `${transferProgress}%` }}></div></div>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-blue-300">Uploading...</span>
+                              <span className="text-green-300">{transferProgress}%</span>
+                            </div>
+                            <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                              <div className="h-full bg-blue-500 transition-all" style={{ width: `${transferProgress}%` }}></div>
+                            </div>
                          </div>
                        )}
 
@@ -930,8 +947,17 @@ const App: React.FC = () => {
                            <p className="text-green-400 font-bold mb-2">✅ Upload Successful!</p>
                            <p className="text-xs text-gray-400 mb-2">Share this link to download anytime:</p>
                            <div className="flex gap-2">
-                             <input readOnly value={cloudLink} className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs font-mono text-gray-300 select-all" />
-                             <button onClick={() => navigator.clipboard.writeText(cloudLink)} className="bg-gray-700 px-3 rounded hover:bg-gray-600">📋</button>
+                             <input 
+                               readOnly 
+                               value={cloudLink} 
+                               className="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs font-mono text-gray-300 select-all truncate" 
+                             />
+                             <button 
+                               onClick={() => navigator.clipboard.writeText(cloudLink)} 
+                               className="bg-gray-700 px-3 rounded hover:bg-gray-600 transition-colors"
+                             >
+                               📋
+                             </button>
                            </div>
                          </div>
                        )}
