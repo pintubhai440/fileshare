@@ -595,6 +595,9 @@ const App: React.FC = () => {
 
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', uploadUrl, true);
+      // 👇👇 SIRF YE LINE ADD KARNI HAI 👇👇
+      xhr.setRequestHeader('Content-Type', fileType); 
+      // 👆👆 Ye line Google ko batayegi ki file ka type wahi hai jo humne bola tha
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
