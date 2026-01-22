@@ -595,8 +595,6 @@ const App: React.FC = () => {
 
       const xhr = new XMLHttpRequest();
       xhr.open('PUT', uploadUrl, true);
-      
-      // ✅ FIX: Ye line zaroori hai, warna Network Error aayega!
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
