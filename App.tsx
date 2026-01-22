@@ -572,32 +572,24 @@ const App: React.FC = () => {
     alert('Peer ID copied to clipboard!');
   };
 
-  // 🔥 UPDATED: Direct Google Drive Upload Function with FIXES
+  // 🔥 UPDATED: Server-side Google Drive Upload Function (via our API)
   const uploadToGoogleDrive = async () => {
     if (filesQueue.length === 0) return;
-
-    setIsUploadingCloud(true);
-    setTransferSpeed('Getting Secure Link...');
     
+    setIsUploadingCloud(true);
+    setTransferSpeed('Uploading to Server...');
+    setTransferProgress(0);
+
     try {
       const file = filesQueue[0];
-      // Type agar khali ho to default lagao
-      const fileType = file.type || 'application/octet-stream';
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('name', file.name);
+      formData.append('type', file.type || 'application/octet-stream');
 
-      // 1. Backend se Link Mango
-      const res = await fetch(`/api/get-upload-url?name=${encodeURIComponent(file.name)}&type=${encodeURIComponent(fileType)}`);
-      
-      if (!res.ok) throw new Error('Failed to get upload link');
-      const { uploadUrl } = await res.json();
-
-      // 2. Google Drive Upload
-      setTransferSpeed('Starting High-Speed Upload...');
-
+      // XHR se progress track karo
       const xhr = new XMLHttpRequest();
-      xhr.open('PUT', uploadUrl, true);
-      
-      // ✅ FIX: Ye line zaroori hai, warna Network Error aayega!
-      xhr.setRequestHeader('Content-Type', fileType);
+      xhr.open('POST', '/api/upload-to-drive', true);
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
@@ -608,34 +600,30 @@ const App: React.FC = () => {
       };
 
       xhr.onload = () => {
-        if (xhr.status === 200 || xhr.status === 201 || xhr.status === 308) {
-          // Response check karo
+        if (xhr.status === 200) {
           try {
-             const response = JSON.parse(xhr.responseText);
-             const viewerLink = `https://drive.google.com/file/d/${response.id}/view?usp=sharing`;
-             setCloudLink(viewerLink);
-             setTransferSpeed('Upload Complete! Share the link below.');
-             setTransferProgress(100);
-          } catch(e) {
-             console.log("Upload done but response parsing failed", xhr.responseText);
-             // Agar upload ho gaya par response JSON nahi hai (Google kabhi kabhi 308 deta hai resume ke liye)
-             setTransferSpeed('Upload Done! (Processing...)');
-             setTransferProgress(100);
+            const data = JSON.parse(xhr.responseText);
+            setCloudLink(data.viewerLink);
+            setTransferSpeed('Upload Complete! 🎉');
+            setTransferProgress(100);
+          } catch (err) {
+            console.error('Failed to parse response:', err);
+            alert('Upload failed: Invalid response from server');
           }
         } else {
-          console.error('Upload Error Status:', xhr.status, xhr.responseText);
-          alert(`Upload Failed: Server sent ${xhr.status}`);
+          console.error('Upload failed with status:', xhr.status, xhr.responseText);
+          alert('Upload failed: Server error ' + xhr.status);
         }
         setIsUploadingCloud(false);
       };
 
       xhr.onerror = () => {
         console.error('XHR Network Error');
-        alert('Network Error: Check Internet or CORS');
+        alert('Network error: Check your internet connection');
         setIsUploadingCloud(false);
       };
 
-      xhr.send(file);
+      xhr.send(formData);
 
     } catch (err: any) {
       console.error(err);
