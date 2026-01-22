@@ -20,7 +20,7 @@ interface TransferStats {
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>(Tab.SEND);
-  const [transferMode, setTransferMode] = useState<'p2p' | 'cloud'>('p2p');
+  const [transferMode, setTransferMode] = useState<'p2p' | 'cloud' | 'google-drive'>('p2p');
   
   // PeerJS State
   const [myPeerId, setMyPeerId] = useState<string>('');
@@ -42,7 +42,7 @@ const App: React.FC = () => {
   const [isFileSaved, setIsFileSaved] = useState(false);
   const [isProcessingFile, setIsProcessingFile] = useState(false);
 
-  // Cloud State (Supabase)
+  // Cloud State (Supabase & Google Drive)
   const [cloudLink, setCloudLink] = useState<string | null>(null);
   const [isUploadingCloud, setIsUploadingCloud] = useState(false);
   
@@ -572,8 +572,69 @@ const App: React.FC = () => {
     alert('Peer ID copied to clipboard!');
   };
 
-  // 🔥 NEW: Supabase Cloud Upload Function
-  const uploadToCloud = async () => {
+  // 🔥 NEW: Direct Google Drive Upload Function
+  const uploadToGoogleDrive = async () => {
+    if (filesQueue.length === 0) return;
+
+    setIsUploadingCloud(true);
+    setTransferSpeed('Getting Secure Link...');
+    
+    try {
+      const file = filesQueue[0];
+
+      // 1. Backend se Link Mango
+      const res = await fetch(`/api/get-upload-url?name=${encodeURIComponent(file.name)}&type=${encodeURIComponent(file.type)}`);
+      
+      if (!res.ok) throw new Error('Failed to get upload link');
+      const { uploadUrl } = await res.json();
+
+      // 2. Google Drive Upload
+      setTransferSpeed('Starting High-Speed Upload...');
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', uploadUrl, true);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          setTransferProgress(percent);
+          setTransferSpeed(`Uploading to Drive... ☁️ ${percent}%`);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 200 || xhr.status === 201) {
+          const response = JSON.parse(xhr.responseText);
+          // Public View Link
+          const viewerLink = `https://drive.google.com/file/d/${response.id}/view?usp=sharing`;
+          
+          setCloudLink(viewerLink);
+          setTransferSpeed('Upload Complete! Share the link below.');
+          setTransferProgress(100);
+        } else {
+          console.error('Upload Error:', xhr.responseText);
+          alert('Upload Failed via Google');
+        }
+        setIsUploadingCloud(false);
+      };
+
+      xhr.onerror = () => {
+        alert('Network Error during Upload');
+        setIsUploadingCloud(false);
+      };
+
+      xhr.send(file);
+
+    } catch (err: any) {
+      console.error(err);
+      setTransferSpeed('Error: ' + err.message);
+      alert('Error: ' + err.message);
+      setIsUploadingCloud(false);
+    }
+  };
+
+  // 🔥 EXISTING: Supabase Cloud Upload Function
+  const uploadToSupabase = async () => {
     if (!supabase) {
       alert("Supabase is not configured! Check Vercel Environment Variables.");
       return;
@@ -615,6 +676,15 @@ const App: React.FC = () => {
       alert('Upload Error: ' + err.message);
     } finally {
       setIsUploadingCloud(false);
+    }
+  };
+
+  // Unified Cloud Upload Handler
+  const handleCloudUpload = async () => {
+    if (transferMode === 'google-drive') {
+      await uploadToGoogleDrive();
+    } else if (transferMode === 'cloud') {
+      await uploadToSupabase();
     }
   };
 
@@ -688,18 +758,24 @@ const App: React.FC = () => {
         </div>
 
         {/* MODE SWITCHER */}
-        <div className="flex items-center gap-4 mb-6 bg-gray-900/80 p-2 rounded-full border border-gray-700">
+        <div className="flex items-center gap-2 mb-6 bg-gray-900/80 p-2 rounded-full border border-gray-700">
            <button 
              onClick={() => setTransferMode('p2p')}
              className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${transferMode === 'p2p' ? 'bg-green-500 text-black' : 'text-gray-400'}`}
            >
-             ⚡ Direct P2P (Fastest)
+             ⚡ Direct P2P
            </button>
            <button 
              onClick={() => setTransferMode('cloud')}
              className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${transferMode === 'cloud' ? 'bg-blue-500 text-white' : 'text-gray-400'}`}
            >
-             ☁️ Cloud Store (Download Later)
+             ☁️ Supabase
+           </button>
+           <button 
+             onClick={() => setTransferMode('google-drive')}
+             className={`px-4 py-1.5 rounded-full text-sm font-bold transition-all ${transferMode === 'google-drive' ? 'bg-red-500 text-white' : 'text-gray-400'}`}
+           >
+             📁 Google Drive
            </button>
         </div>
 
@@ -829,11 +905,15 @@ const App: React.FC = () => {
                      /* Cloud UI */
                      <div className="space-y-4 animate-fade-in">
                        <button 
-                         onClick={uploadToCloud} 
+                         onClick={handleCloudUpload} 
                          disabled={filesQueue.length === 0 || isUploadingCloud}
-                         className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all ${isUploadingCloud ? 'bg-gray-700 cursor-wait' : 'bg-blue-600 hover:bg-blue-500'}`}
+                         className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all ${isUploadingCloud ? 'bg-gray-700 cursor-wait' : transferMode === 'google-drive' ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-600 hover:bg-blue-500'}`}
                        >
-                         {isUploadingCloud ? 'Uploading to Cloud...' : '☁️ UPLOAD TO CLOUD'}
+                         {isUploadingCloud 
+                           ? 'Uploading...' 
+                           : transferMode === 'google-drive' 
+                             ? '📁 UPLOAD TO GOOGLE DRIVE' 
+                             : '☁️ UPLOAD TO SUPABASE'}
                        </button>
 
                        {/* Progress Bar for Cloud */}
