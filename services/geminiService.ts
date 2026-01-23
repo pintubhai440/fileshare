@@ -141,7 +141,7 @@ export const sendChatMessage = async (
       TONE: Helpful, technical, and concise.
     `;
 
-    // Using 'gemini-2.0-flash' for speed and better quota limits
+    // Using your requested model
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash', 
       contents: [
@@ -230,7 +230,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   return executeWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts", // Flash is reliable for TTS
+      model: "gemini-2.5-flash-preview-tts", // Using your requested model
       contents: [{ 
         parts: [{ text: `Read this aloud naturally (audio only): "${text}"` }] 
       }],
@@ -257,7 +257,10 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
     
     if (!base64Audio) throw new Error("No audio data found in response.");
     
-    const binaryString = atob(base64Audio);
+    // ✅ FIX: Clean Base64 string to remove newlines/spaces before decoding
+    const cleanBase64 = base64Audio.replace(/[\n\r\s]/g, '');
+    
+    const binaryString = atob(cleanBase64);
     const len = binaryString.length;
     const bytes = new Uint8Array(len);
     for (let i = 0; i < len; i++) {
