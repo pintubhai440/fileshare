@@ -1,24 +1,39 @@
-// pintubhai440/fileshare/fileshare-c54f6aad70ff6fddf9043c5ac69c7d568013bc37/services/geminiService.ts
-
 import { GoogleGenAI } from "@google/genai";
 
-// 1. COLLECT ALL KEYS FROM ENV
-const getAllKeys = () => {
-  const keys: string[] = [];
-  
-  // Check specifically named keys (1 to 6)
-  for (let i = 1; i <= 6; i++) {
-    // @ts-ignore
-    const key = process.env[`GEMINI_API_KEY_${i}`];
-    if (key) keys.push(key);
-  }
+// ==========================================
+// 1. KEY ROTATION LOGIC (10 KEYS SUPPORT)
+// ==========================================
 
-  // Fallback to standard key if no numbered keys exist
-  if (keys.length === 0 && process.env.GEMINI_API_KEY) {
-    keys.push(process.env.GEMINI_API_KEY);
-  }
-  
-  return keys;
+const getAllKeys = () => {
+  const possibleKeys = [
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_1,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_2,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_3,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_4,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_5,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_6,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_7,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_8,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_9,
+    // @ts-ignore
+    process.env.GEMINI_API_KEY_10,
+    // @ts-ignore
+    process.env.API_KEY,      // Fallback 1
+    // @ts-ignore
+    process.env.GEMINI_API_KEY // Fallback 2
+  ];
+
+  // Sirf wahi keys rakhein jo actually exist karti hain (not empty)
+  return possibleKeys.filter(key => key && key.trim().length > 0);
 };
 
 const API_KEYS = getAllKeys();
@@ -26,32 +41,43 @@ let currentKeyIndex = 0;
 
 console.log(`Loaded ${API_KEYS.length} API Keys for rotation.`);
 
-// 2. HELPER: GET CURRENT CLIENT
+// Helper: Get Current Client
 const getClient = () => {
+  if (API_KEYS.length === 0) {
+    console.error("No API Keys found!");
+    throw new Error("API Key configurations missing. Please check your .env or Vercel settings.");
+  }
   const key = API_KEYS[currentKeyIndex];
-  if (!key) throw new Error("No API Keys found in Environment Variables.");
   return new GoogleGenAI({ apiKey: key });
 };
 
-// 3. ROTATION LOGIC WRAPPER
-// Yeh function try karega, agar fail hua toh next key pe jayega
+// Main Rotation Wrapper
+// Yeh function error aane par automatic agli key try karta hai
 const executeWithFallback = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> => {
   let attempts = 0;
   
+  // Try until we run out of keys (one full cycle)
   while (attempts < API_KEYS.length) {
     try {
       const ai = getClient();
       return await operation(ai);
     } catch (error: any) {
-      // Check for Quota Error (429)
-      if (error?.message?.includes('429') || error?.status === 429 || error?.toString().includes('Quota')) {
-        console.warn(`Key ${currentKeyIndex + 1} exhausted. Switching to next key...`);
+      console.error(`Attempt with Key ${currentKeyIndex + 1} failed:`, error.message);
+
+      // Check for Quota Error (429) or Service Unavailable (503)
+      const isQuotaError = error?.message?.includes('429') || 
+                           error?.status === 429 || 
+                           error?.toString().includes('Quota') || 
+                           error?.toString().includes('Resource has been exhausted');
+
+      if (isQuotaError) {
+        console.warn(`⚠️ Key ${currentKeyIndex + 1} exhausted. Switching to next key...`);
         
         // Rotate Key
         currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
         attempts++;
       } else {
-        // Agar koi aur error hai (like Network), toh throw karo
+        // Agar koi aur error hai (jaise Network Error), toh turant throw karo
         throw error;
       }
     }
@@ -59,7 +85,9 @@ const executeWithFallback = async <T>(operation: (ai: GoogleGenAI) => Promise<T>
   throw new Error("All API Keys exhausted. Please try again later.");
 };
 
-// --- SERVICES ---
+// ==========================================
+// 2. FILE HELPERS
+// ==========================================
 
 export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
   if (file.size > 20 * 1024 * 1024) {
@@ -91,7 +119,13 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
   });
 };
 
-// 1. Smart Chatbot (Rotated)
+// ==========================================
+// 3. AI SERVICES (Wrapped with Rotation)
+// ==========================================
+
+/**
+ * 1. Smart Chatbot
+ */
 export const sendChatMessage = async (
   history: { role: string; parts: { text: string }[] }[],
   message: string
@@ -107,7 +141,7 @@ export const sendChatMessage = async (
       TONE: Helpful, technical, and concise.
     `;
 
-    // Note: 'gemini-2.0-flash' is faster and has higher limits than 'pro'
+    // Using 'gemini-2.0-flash' for speed and better quota limits
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash', 
       contents: [
@@ -120,18 +154,22 @@ export const sendChatMessage = async (
     });
 
     const text = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't generate a response.";
-    
-    // Safe grounding check
+
     const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
     const urls = groundingChunks
       ?.map((chunk: any) => chunk.web ? { title: chunk.web.title, uri: chunk.web.uri } : null)
       .filter((u: any) => u !== null) || [];
 
-    return { text, urls };
+    return {
+      text: text,
+      urls: urls
+    };
   });
 };
 
-// 2. Analyze Image/Video (Rotated)
+/**
+ * 2. Analyze Image/Video
+ */
 export const analyzeFileContent = async (file: File): Promise<string> => {
   if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) {
     return "File type not supported for AI analysis.";
@@ -141,7 +179,7 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
 
   return executeWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: {
         parts: [
           filePart,
@@ -149,11 +187,14 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
         ]
       }
     });
+
     return response.text || "No analysis available.";
   });
 };
 
-// 3. Transcribe Audio (Rotated)
+/**
+ * 3. Transcribe Audio
+ */
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   const reader = new FileReader();
   
@@ -162,9 +203,10 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
       try {
         const base64data = (reader.result as string).split(',')[1];
         
+        // Execute inside rotation logic
         const result = await executeWithFallback(async (ai) => {
           const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-2.5-flash',
             contents: {
               parts: [
                 { inlineData: { mimeType: audioBlob.type || 'audio/wav', data: base64data } },
@@ -182,16 +224,18 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   });
 };
 
-// 4. Text-to-Speech (Rotated)
+/**
+ * 4. Text-to-Speech (Audio Generation)
+ */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   return executeWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash", // Flash is reliable for TTS
       contents: [{ 
         parts: [{ text: `Read this aloud naturally (audio only): "${text}"` }] 
       }],
       config: {
-        responseModalities: ["AUDIO"],
+        responseModalities: ["AUDIO"], // Force Audio mode
         speechConfig: {
           voiceConfig: {
             prebuiltVoiceConfig: { voiceName: 'Kore' },
@@ -200,6 +244,7 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
       },
     });
 
+    // Loop through parts to find the actual audio data
     const parts = response.candidates?.[0]?.content?.parts || [];
     let base64Audio = null;
 
@@ -210,7 +255,7 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
       }
     }
     
-    if (!base64Audio) throw new Error("No audio data found.");
+    if (!base64Audio) throw new Error("No audio data found in response.");
     
     const binaryString = atob(base64Audio);
     const len = binaryString.length;
