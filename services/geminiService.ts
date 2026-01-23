@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 
 // ==========================================
-// 1. KEY ROTATION LOGIC (10 KEYS SUPPORT)
+// 1. KEY ROTATION LOGIC (YOUR ORIGINAL 1-23 KEYS)
 // ==========================================
 
 const getAllKeys = () => {
@@ -127,17 +127,20 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
 };
 
 // ==========================================
-// 3. AI SERVICES
+// 3. AI SERVICES (SECURE SHARE + TTS)
 // ==========================================
 
+const CHAT_MODEL_NAME = 'gemini-2.5-flash-lite'; 
+
 /**
- * 1. Smart Chatbot
+ * 1. Smart Chatbot (SecureShare Persona)
  */
 export const sendChatMessage = async (
   history: { role: string; parts: { text: string }[] }[],
   message: string
 ) => {
   return executeWithFallback(async (ai) => {
+    // ✅ SecureShare Persona retained
     const systemInstruction = `
       You are the intelligent assistant for 'SecureShare AI', a secure P2P file transfer platform.
       YOUR KNOWLEDGE BASE:
@@ -149,7 +152,7 @@ export const sendChatMessage = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', 
+      model: CHAT_MODEL_NAME, // ✅ Updated Model
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
@@ -185,7 +188,7 @@ export const analyzeFileContent = async (file: File): Promise<string> => {
 
   return executeWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: CHAT_MODEL_NAME, // ✅ Updated Model
       contents: {
         parts: [
           filePart,
@@ -211,7 +214,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
         
         const result = await executeWithFallback(async (ai) => {
           const response = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: CHAT_MODEL_NAME, // ✅ Updated Model
             contents: {
               parts: [
                 { inlineData: { mimeType: audioBlob.type || 'audio/wav', data: base64data } },
@@ -230,12 +233,13 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
 };
 
 /**
- * 4. Text-to-Speech (Audio Generation) - FIXED
+ * 4. Text-to-Speech (Speaking Feature)
  */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   return executeWithFallback(async (ai) => {
-    // ⚠️ STRICTLY USING 'gemini-2.0-flash-exp' which is known to work for Audio
-    // 'gemini-2.5-flash-preview-tts' might be unstable or require different headers
+    // Note: TTS ke liye specific model use karna padta hai jo audio support kare.
+    // Agar 'gemini-2.5-flash-lite' audio generation support nahi karta, toh hum fallback use karenge.
+    // Safety ke liye abhi 'gemini-2.0-flash-exp' rakh rahe hain jo GUARANTEED audio deta hai.
     
     const response = await ai.models.generateContent({
       model: "gemini-2.0-flash-exp", 
@@ -264,8 +268,7 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
     
     if (!base64Audio) throw new Error("No audio data found in response.");
     
-    // ✅ FIX: Safer Base64 Decoding
-    const cleanBase64 = base64Audio.replace(/[^A-Za-z0-9+/=]/g, ""); // Remove ALL non-base64 chars
+    const cleanBase64 = base64Audio.replace(/[^A-Za-z0-9+/=]/g, ""); 
     
     const binaryString = atob(cleanBase64);
     const len = binaryString.length;
