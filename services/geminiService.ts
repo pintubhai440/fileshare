@@ -32,6 +32,7 @@ const getAllKeys = () => {
     process.env.GEMINI_API_KEY // Fallback 2
   ];
 
+  // Sirf wahi keys rakhein jo actually exist karti hain (not empty)
   return possibleKeys.filter(key => key && key.trim().length > 0);
 };
 
@@ -40,24 +41,31 @@ let currentKeyIndex = 0;
 
 console.log(`Loaded ${API_KEYS.length} API Keys for rotation.`);
 
+// Helper: Get Current Client
 const getClient = () => {
-  if (API_KEYS.length === 0) throw new Error("No API Keys found!");
+  if (API_KEYS.length === 0) {
+    console.error("No API Keys found!");
+    throw new Error("API Key configurations missing. Please check your .env or Vercel settings.");
+  }
   const key = API_KEYS[currentKeyIndex];
   return new GoogleGenAI({ apiKey: key });
 };
 
+// Main Rotation Wrapper
 const executeWithFallback = async <T>(operation: (ai: GoogleGenAI) => Promise<T>): Promise<T> => {
   let attempts = 0;
+  
   while (attempts < API_KEYS.length) {
     try {
       const ai = getClient();
       return await operation(ai);
     } catch (error: any) {
       console.error(`Attempt with Key ${currentKeyIndex + 1} failed:`, error.message);
-      
+
       const isQuotaError = error?.message?.includes('429') || 
                            error?.status === 429 || 
-                           error?.toString().includes('Quota');
+                           error?.toString().includes('Quota') || 
+                           error?.toString().includes('Resource has been exhausted');
 
       if (isQuotaError) {
         console.warn(`⚠️ Key ${currentKeyIndex + 1} exhausted. Switching to next key...`);
@@ -68,7 +76,7 @@ const executeWithFallback = async <T>(operation: (ai: GoogleGenAI) => Promise<T>
       }
     }
   }
-  throw new Error("All API Keys exhausted.");
+  throw new Error("All API Keys exhausted. Please try again later.");
 };
 
 // ==========================================
@@ -76,81 +84,131 @@ const executeWithFallback = async <T>(operation: (ai: GoogleGenAI) => Promise<T>
 // ==========================================
 
 export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { data: string; mimeType: string } }> => {
-  if (file.size > 20 * 1024 * 1024) throw new Error("File too large (Max 20MB).");
+  if (file.size > 20 * 1024 * 1024) {
+    throw new Error("File too large for AI analysis (Max 20MB allowed for this demo).");
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
       try {
-        const base64String = (reader.result as string).split(',')[1];
-        resolve({ inlineData: { data: base64String, mimeType: file.type || 'application/octet-stream' } });
-      } catch (e) { reject(e); }
+        if (reader.error) throw reader.error;
+        if (!reader.result) throw new Error("Failed to read file.");
+        
+        const resultStr = reader.result as string;
+        const base64String = resultStr.split(',')[1];
+        
+        resolve({
+          inlineData: {
+            data: base64String,
+            mimeType: file.type || 'application/octet-stream'
+          }
+        });
+      } catch (e) {
+        reject(e);
+      }
     };
-    reader.onerror = (e) => reject(new Error("FileReader Error"));
+    reader.onerror = (e) => reject(new Error(`FileReader Error: ${e.target?.error?.message}`));
     reader.readAsDataURL(file);
   });
 };
 
 // ==========================================
-// 3. AI SERVICES (UPDATED MODELS)
+// 3. AI SERVICES
 // ==========================================
 
-// 1. Smart Chatbot (Using Gemini 2.5 Flash for speed)
+/**
+ * 1. Smart Chatbot
+ */
 export const sendChatMessage = async (
   history: { role: string; parts: { text: string }[] }[],
   message: string
 ) => {
   return executeWithFallback(async (ai) => {
-    const systemInstruction = `You are 'SecureShare AI'. Keep answers short, technical, and helpful.`;
-    
-    // Using the stable Gemini 2.5 Flash model
+    const systemInstruction = `
+      You are the intelligent assistant for 'SecureShare AI', a secure P2P file transfer platform.
+      YOUR KNOWLEDGE BASE:
+      - Identity: You are the SecureShare AI Bot.
+      - Core Tech: WebRTC (PeerJS). NO SERVER STORAGE.
+      - Privacy: Files are 100% private, existing only in RAM. 
+      - Deletion: Files vanish instantly when tab closes.
+      TONE: Helpful, technical, and concise.
+    `;
+
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash', 
+      model: 'gemini-2.0-flash', 
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
       ],
-      config: { systemInstruction: { parts: [{ text: systemInstruction }] } }
+      config: {
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+      }
     });
 
-    const text = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "No response.";
-    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    const urls = groundingChunks?.map((chunk: any) => chunk.web ? { title: chunk.web.title, uri: chunk.web.uri } : null).filter((u: any) => u !== null) || [];
+    const text = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't generate a response.";
 
-    return { text, urls };
+    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    const urls = groundingChunks
+      ?.map((chunk: any) => chunk.web ? { title: chunk.web.title, uri: chunk.web.uri } : null)
+      .filter((u: any) => u !== null) || [];
+
+    return {
+      text: text,
+      urls: urls
+    };
   });
 };
 
-// 2. Analyze Image/Video (Using Gemini 2.5 Flash)
+/**
+ * 2. Analyze Image/Video
+ */
 export const analyzeFileContent = async (file: File): Promise<string> => {
+  if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) {
+    return "File type not supported for AI analysis.";
+  }
+
   const filePart = await fileToGenerativePart(file);
+
   return executeWithFallback(async (ai) => {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: { parts: [ filePart, { text: "Analyze this file concisely." } ] }
+      model: 'gemini-2.0-flash',
+      contents: {
+        parts: [
+          filePart,
+          { text: "Analyze this file. Be concise but professional." }
+        ]
+      }
     });
+
     return response.text || "No analysis available.";
   });
 };
 
-// 3. Transcribe Audio (Using Gemini 2.5 Flash)
+/**
+ * 3. Transcribe Audio
+ */
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
+  const reader = new FileReader();
+  
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
     reader.onloadend = async () => {
       try {
         const base64data = (reader.result as string).split(',')[1];
+        
         const result = await executeWithFallback(async (ai) => {
           const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-2.0-flash',
             contents: {
               parts: [
                 { inlineData: { mimeType: audioBlob.type || 'audio/wav', data: base64data } },
-                { text: "Transcribe this audio." }
+                { text: "Transcribe this audio accurately." }
               ]
             }
           });
           return response.text || "";
         });
+        
         resolve(result);
       } catch (e) { reject(e); }
     };
@@ -158,33 +216,28 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   });
 };
 
-// 4. Text-to-Speech (Trying Gemini 2.5 Flash TTS with fallback)
+/**
+ * 4. Text-to-Speech (Audio Generation) - FIXED
+ */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   return executeWithFallback(async (ai) => {
-    let response;
+    // ⚠️ STRICTLY USING 'gemini-2.0-flash-exp' which is known to work for Audio
+    // 'gemini-2.5-flash-preview-tts' might be unstable or require different headers
     
-    try {
-      // 🎯 PRIORITY 1: Try the latest specialized TTS model
-      response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts", 
-        contents: [{ parts: [{ text: `Read this aloud: "${text}"` }] }],
-        config: {
-          responseModalities: ["AUDIO"], 
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+    const response = await ai.models.generateContent({
+      model: "gemini-2.0-flash-exp", 
+      contents: [{ 
+        parts: [{ text: `Read this aloud naturally: "${text}"` }] 
+      }],
+      config: {
+        responseModalities: ["AUDIO"], // Force Audio mode
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: 'Kore' },
+          },
         },
-      });
-    } catch (err) {
-      console.warn("Gemini 2.5 TTS failed, falling back to 2.0 Flash Exp...", err);
-      // 🛡️ FALLBACK: Use Gemini 2.0 Flash Exp if 2.5 fails (Reliable Backup)
-      response = await ai.models.generateContent({
-        model: "gemini-2.0-flash-exp", 
-        contents: [{ parts: [{ text: `Read this aloud: "${text}"` }] }],
-        config: {
-          responseModalities: ["AUDIO"], 
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
-        },
-      });
-    }
+      },
+    });
 
     const parts = response.candidates?.[0]?.content?.parts || [];
     let base64Audio = null;
@@ -196,10 +249,11 @@ export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
       }
     }
     
-    if (!base64Audio) throw new Error("AI did not return audio data.");
+    if (!base64Audio) throw new Error("No audio data found in response.");
     
-    // Clean Base64 to prevent format errors
-    const cleanBase64 = base64Audio.replace(/[\n\r\s]/g, '');
+    // ✅ FIX: Safer Base64 Decoding
+    const cleanBase64 = base64Audio.replace(/[^A-Za-z0-9+/=]/g, ""); // Remove ALL non-base64 chars
+    
     const binaryString = atob(cleanBase64);
     const len = binaryString.length;
     const bytes = new Uint8Array(len);
