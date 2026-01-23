@@ -45,7 +45,7 @@ const getAllKeys = () => {
     process.env.GEMINI_API_KEY // Fallback 2
   ];
 
-  // Sirf wahi keys rakhein jo actually exist karti hain (not empty)
+  // Keep only keys that actually exist (not empty)
   return possibleKeys.filter(key => key && key.trim().length > 0);
 };
 
@@ -237,9 +237,9 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
  */
 export const generateSpeech = async (text: string): Promise<ArrayBuffer> => {
   return executeWithFallback(async (ai) => {
-    // Note: TTS ke liye specific model use karna padta hai jo audio support kare.
-    // Agar 'gemini-2.5-flash-lite' audio generation support nahi karta, toh hum fallback use karenge.
-    // Safety ke liye abhi 'gemini-2.0-flash-exp' rakh rahe hain jo GUARANTEED audio deta hai.
+    // Note: TTS requires a model that supports audio generation.
+    // 'gemini-2.5-flash-lite' likely does not support audio out yet.
+    // Using 'gemini-2.0-flash-exp' as a reliable fallback for audio generation.
     
     const response = await ai.models.generateContent({
       model: "gemini-2.0-flash-exp", 
