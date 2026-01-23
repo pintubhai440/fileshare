@@ -1,10 +1,9 @@
-// vite.config.ts
-
 import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
+    // Load env file based on `mode` in the current working directory.
     const env = loadEnv(mode, '.', '');
 
     return {
@@ -14,7 +13,7 @@ export default defineConfig(({ mode }) => {
       },
       plugins: [react()],
       define: {
-        // 1 se 10 tak saari keys yahan define kar rahe hain
+        // 1. Explicitly defining keys 1 to 10 so Vite can replace them at build time
         'process.env.GEMINI_API_KEY_1': JSON.stringify(env.GEMINI_API_KEY_1 || ''),
         'process.env.GEMINI_API_KEY_2': JSON.stringify(env.GEMINI_API_KEY_2 || ''),
         'process.env.GEMINI_API_KEY_3': JSON.stringify(env.GEMINI_API_KEY_3 || ''),
@@ -25,8 +24,8 @@ export default defineConfig(({ mode }) => {
         'process.env.GEMINI_API_KEY_8': JSON.stringify(env.GEMINI_API_KEY_8 || ''),
         'process.env.GEMINI_API_KEY_9': JSON.stringify(env.GEMINI_API_KEY_9 || ''),
         'process.env.GEMINI_API_KEY_10': JSON.stringify(env.GEMINI_API_KEY_10 || ''),
-        
-        // Fallbacks
+
+        // 2. Fallbacks for standard keys
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY || ''),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY || '')
       },
