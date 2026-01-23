@@ -27,6 +27,19 @@ const getAllKeys = () => {
     // @ts-ignore
     process.env.GEMINI_API_KEY_10,
     // @ts-ignore
+    process.env.GEMINI_API_KEY_11,
+    process.env.GEMINI_API_KEY_12,
+    process.env.GEMINI_API_KEY_13,
+    process.env.GEMINI_API_KEY_14,
+    process.env.GEMINI_API_KEY_15,
+    process.env.GEMINI_API_KEY_16,
+    process.env.GEMINI_API_KEY_17,
+    process.env.GEMINI_API_KEY_18,
+    process.env.GEMINI_API_KEY_19,
+    process.env.GEMINI_API_KEY_20,
+    process.env.GEMINI_API_KEY_21,
+    process.env.GEMINI_API_KEY_22,
+    process.env.GEMINI_API_KEY_23,
     process.env.API_KEY,      // Fallback 1
     // @ts-ignore
     process.env.GEMINI_API_KEY // Fallback 2
