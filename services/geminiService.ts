@@ -109,7 +109,7 @@ export const sendChatMessage = async (
 
     // Note: 'gemini-2.0-flash' is faster and has higher limits than 'pro'
     const response = await ai.models.generateContent({
-      model: 'gemini-2.0-flash', 
+      model: 'gemini-2.5-flash', 
       contents: [
         ...history,
         { role: 'user', parts: [{ text: message }] }
