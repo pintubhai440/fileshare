@@ -271,8 +271,6 @@ const App: React.FC = () => {
         const totalTime = (Date.now() - transferStatsRef.current.startTime) / 1000;
         const avgSpeed = (bytesReceivedRef.current / totalTime) / (1024 * 1024);
         transferStatsRef.current.averageSpeed = avgSpeed;
-        
-        // Removed global ACK from here
       }
       else if (data.type === 'ready_to_receive') {
         // Sender is ready
@@ -671,7 +669,7 @@ const App: React.FC = () => {
     }
   };
 
-  // 🔥 EXISTING: Supabase Cloud Upload Function
+  // 🔥 FIX: Supabase Multi-File Upload Loop
   const uploadToSupabase = async () => {
     if (!supabase) {
       alert("Supabase is not configured! Check Vercel Environment Variables.");
@@ -680,33 +678,45 @@ const App: React.FC = () => {
     if (filesQueue.length === 0) return;
 
     setIsUploadingCloud(true);
-    setTransferSpeed('Starting Upload...');
+    setTransferProgress(0);
     
+    const uploadedLinks: string[] = []; // सभी लिंक्स यहाँ स्टोर होंगे
+
     try {
-      const file = filesQueue[0];
-      const fileName = `${Date.now()}_${file.name.replace(/\s/g, '_')}`;
+      // Loop through ALL selected files
+      for (let i = 0; i < filesQueue.length; i++) {
+        const file = filesQueue[i];
+        const fileName = `${Date.now()}_${file.name.replace(/\s/g, '_')}`;
 
-      const { data, error } = await supabase.storage
-        .from('shared-files')
-        .upload(fileName, file, {
-          cacheControl: '3600',
-          upsert: false,
-          onUploadProgress: (progress) => {
-             const percent = (progress.loaded / progress.total) * 100;
-             setTransferProgress(Math.round(percent));
-             setTransferSpeed('Uploading to Cloud... ☁️');
-          }
-        });
+        // Status Update
+        setTransferSpeed(`Uploading ${i + 1}/${filesQueue.length}: ${file.name}...`);
 
-      if (error) throw error;
+        const { data, error } = await supabase.storage
+          .from('shared-files')
+          .upload(fileName, file, {
+            cacheControl: '3600',
+            upsert: false,
+            onUploadProgress: (progress) => {
+               // प्रोग्रेस सिर्फ करंट फाइल की दिखाएगा
+               const percent = Math.round((progress.loaded / progress.total) * 100);
+               setTransferProgress(percent);
+            }
+          });
 
-      const { data: publicUrlData } = supabase.storage
-        .from('shared-files')
-        .getPublicUrl(fileName);
+        if (error) throw error;
 
-      setCloudLink(publicUrlData.publicUrl);
-      setTransferSpeed('Upload Complete! Share the link below.');
+        const { data: publicUrlData } = supabase.storage
+          .from('shared-files')
+          .getPublicUrl(fileName);
+
+        uploadedLinks.push(publicUrlData.publicUrl);
+      }
+
+      setTransferSpeed('All Files Uploaded Successfully! 🎉');
       setTransferProgress(100);
+      
+      // सारे लिंक्स को एक साथ दिखाएं (Separator के साथ)
+      setCloudLink(uploadedLinks.join("   |   "));
 
     } catch (err: any) {
       console.error(err);
